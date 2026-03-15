@@ -5,18 +5,14 @@ set -e
 # Configuration from environment
 # ---------------------------------------------------------------------------
 LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=goauthentik,DC=io}"
-LDAP_ADMIN_PASSWORD="${LDAP_ADMIN_PASSWORD:-admin}"
 LDAP_PORT="${LDAP_PORT:-3389}"
 SLAPD_LOG_LEVEL="${SLAPD_LOG_LEVEL:-256}"
 
 # ---------------------------------------------------------------------------
 # 1. Generate slapd.conf from template
 # ---------------------------------------------------------------------------
-ROOT_PW_HASH=$(slappasswd -s "$LDAP_ADMIN_PASSWORD")
-
 sed \
     -e "s|%%BASE_DN%%|${LDAP_BASE_DN}|g" \
-    -e "s|%%ROOT_PW_HASH%%|${ROOT_PW_HASH}|g" \
     -e "s|%%SLAPD_LOG_LEVEL%%|${SLAPD_LOG_LEVEL}|g" \
     /etc/ldap/slapd.conf.tpl > /etc/ldap/slapd.conf
 
@@ -32,7 +28,7 @@ mkdir -p /var/run/saslauthd
 # 3. Start auth_server.py (replaces saslauthd)
 # ---------------------------------------------------------------------------
 echo "Starting auth_server.py..."
-python3 -u -m app.auth_server &
+uv run --no-sync -m app.auth_server &
 AUTH_PID=$!
 
 sleep 1
@@ -91,4 +87,4 @@ echo "slapd started (PID ${SLAPD_PID})"
 # 6. Run sync.py in foreground (keeps container alive)
 # ---------------------------------------------------------------------------
 echo "Starting sync.py..."
-exec python3 -u -m app.sync
+exec uv run --no-sync -m app.sync

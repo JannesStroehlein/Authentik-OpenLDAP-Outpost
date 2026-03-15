@@ -7,7 +7,6 @@ services:
       AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN}
       AUTHENTIK_AUTH_FLOW_SLUG: default-authentication-flow
       LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
-      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:-admin}
       LDAP_PORT: "3389"
       SYNC_INTERVAL: "300"
       BIND_CACHE_TTL: "300"

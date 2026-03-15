@@ -1,19 +1,29 @@
 """Authentik -> OpenLDAP directory sync.
 
 Polls the authentik REST API for users and groups, converts them to LDIF,
-and loads them into the local slapd via ldapadd/ldapdelete.
+and loads them into the local slapd via ldap3 over ldapi IPC.
 
 General-purpose: attribute mapping matches the authentik LDAP outpost.
 Custom user/group attributes are passed through via extensibleObject.
 """
 
+import copy
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 from typing import Any
+
+from ldap3 import (
+    ALL_ATTRIBUTES,
+    BASE,
+    SUBTREE,
+    Connection,
+    SASL,
+    Server,
+    EXTERNAL,
+)
 
 from .authentik_api import AuthentikClient
 
@@ -21,6 +31,10 @@ log = logging.getLogger("ldap-sync")
 
 # Valid LDAP attribute name: starts with letter, then letters/digits/hyphens
 _VALID_ATTR_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*$")
+_BAD_ATTR_RE = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9-]*)\s*:\s*(attribute type undefined|inappropriate characters)",
+    re.IGNORECASE,
+)
 
 
 class LDAPSync:
@@ -30,15 +44,20 @@ class LDAPSync:
         self,
         client: AuthentikClient,
         base_dn: str,
-        bind_dn: str,
-        bind_pw: str,
-        ldap_uri: str = "ldap://localhost:3389",
+        ldap_uri: str = "ldapi:///",
     ) -> None:
         self.client = client
         self.base_dn = base_dn
-        self.bind_dn = bind_dn
-        self.bind_pw = bind_pw
         self.ldap_uri = ldap_uri
+
+    def _candidate_uris(self) -> list[str]:
+        if self.ldap_uri != "ldapi:///":
+            return [self.ldap_uri]
+        return [
+            "ldapi://%2Frun%2Fslapd%2Fldapi",
+            "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi",
+            self.ldap_uri,
+        ]
 
     def run_forever(self, interval: int) -> None:
         """Wait for slapd, then sync in a loop."""
@@ -85,269 +104,278 @@ class LDAPSync:
                         names.append(name)
             members_by_group[gpk] = names
 
-        # Wipe existing entries
-        self._wipe_entries()
+        conn: Connection | None = None
+        try:
+            conn = self._connect()
 
-        # Create base structure
-        log.info("Creating base structure...")
-        self._ldap_add(self._build_base_ldif())
+            # Wipe existing entries
+            self._wipe_entries(conn)
 
-        # Create user entries
-        log.info("Creating %d user entries...", len(users))
-        for user in users:
-            entry = self._build_user_entry(user)
-            if entry:
-                self._ldap_add_entry(entry)
+            # Create base structure
+            log.info("Creating base structure...")
+            self._create_base_structure(conn)
 
-        # Create group entries
-        log.info("Creating %d group entries...", len(groups))
-        for group in groups:
-            entry = self._build_group_entry(group, members_by_group)
-            if entry:
-                self._ldap_add_entry(entry)
+            # Create user entries
+            log.info("Creating %d user entries...", len(users))
+            for user in users:
+                entry = self._build_user_entry(user)
+                if entry:
+                    self._ldap_add_entry(conn, entry)
+
+            # Create group entries
+            log.info("Creating %d group entries...", len(groups))
+            for group in groups:
+                entry = self._build_group_entry(group, members_by_group)
+                if entry:
+                    self._ldap_add_entry(conn, entry)
+        finally:
+            if conn is not None:
+                conn.unbind()
 
         log.info("Sync complete.")
         return True
 
     # ----- LDIF builders -----
 
-    def _build_base_ldif(self) -> str:
+    def _build_base_entries(self) -> list[tuple[str, list[str], dict[str, Any]]]:
         dc = self.base_dn.split(",")[0].split("=")[1]
-        return (
-            f"dn: {self.base_dn}\n"
-            f"objectClass: top\n"
-            f"objectClass: organization\n"
-            f"objectClass: dcObject\n"
-            f"o: authentik\n"
-            f"dc: {dc}\n"
-            f"\n"
-            f"dn: ou=users,{self.base_dn}\n"
-            f"objectClass: top\n"
-            f"objectClass: organizationalUnit\n"
-            f"ou: users\n"
-            f"\n"
-            f"dn: ou=groups,{self.base_dn}\n"
-            f"objectClass: top\n"
-            f"objectClass: organizationalUnit\n"
-            f"ou: groups\n\n"
-        )
+        return [
+            (
+                self.base_dn,
+                ["top", "organization", "dcObject"],
+                {"o": "authentik", "dc": dc},
+            ),
+            (
+                f"ou=users,{self.base_dn}",
+                ["top", "organizationalUnit"],
+                {"ou": "users"},
+            ),
+            (
+                f"ou=groups,{self.base_dn}",
+                ["top", "organizationalUnit"],
+                {"ou": "groups"},
+            ),
+        ]
 
-    def _build_user_entry(self, user: dict[str, Any]) -> str:
+    def _build_user_entry(self, user: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]] | None:
         username = user.get("username", "")
         if not username:
-            return ""
+            return None
 
         dn = f"cn={username},ou=users,{self.base_dn}"
         name = user.get("name", username)
         email = user.get("email", "")
         is_active = user.get("is_active", False)
         uid_number = user.get("pk", 1000)
-        attrs = user.get("attributes", {})
+        custom_attrs = user.get("attributes", {})
 
-        lines = [
-            f"dn: {dn}",
-            "objectClass: top",
-            "objectClass: person",
-            "objectClass: organizationalPerson",
-            "objectClass: inetOrgPerson",
-            "objectClass: posixAccount",
-            "objectClass: goauthentik-io-ldap-user",
-            "objectClass: extensibleObject",
-            f"cn: {username}",
-            f"uid: {username}",
-            f"sn: {name.split()[-1] if ' ' in name else name}",
-            f"displayName: {name}",
-            f"uidNumber: {uid_number + 10000}",
-            f"gidNumber: 10000",
-            f"homeDirectory: /home/{username}",
-        ]
+        attrs: dict[str, Any] = {
+            "cn": username,
+            "uid": username,
+            "sn": name.split()[-1] if " " in name else name,
+            "displayName": name,
+            "uidNumber": str(uid_number + 10000),
+            "gidNumber": "10000",
+            "homeDirectory": f"/home/{username}",
+            "loginShell": "/bin/bash" if is_active else "/sbin/nologin",
+            "userPassword": f"{{SASL}}{username}@authentik",
+        }
 
-        if ' ' in name:
-            lines.append(f"givenName: {name.split()[0]}")
-
-        lines.append(f"loginShell: {'/bin/bash' if is_active else '/sbin/nologin'}")
+        if " " in name:
+            attrs["givenName"] = name.split()[0]
 
         if email:
-            lines.append(f"mail: {email}")
+            attrs["mail"] = email
 
         # Custom attributes pass-through (skip invalid LDAP attr names)
-        for key, value in attrs.items():
+        for key, value in custom_attrs.items():
             if not _VALID_ATTR_NAME.match(key):
                 continue
             if isinstance(value, list):
-                for v in value:
-                    if v is not None and v != "":
-                        lines.append(f"{key}: {v}")
+                cleaned = [str(v) for v in value if v is not None and v != ""]
+                if cleaned:
+                    attrs[key] = cleaned
             elif isinstance(value, bool):
-                lines.append(f"{key}: {'TRUE' if value else 'FALSE'}")
+                attrs[key] = "TRUE" if value else "FALSE"
             elif value is not None and value != "":
-                lines.append(f"{key}: {value}")
+                attrs[key] = str(value)
 
-        # SASL pass-through password
-        lines.append(f"userPassword: {{SASL}}{username}@authentik")
-        lines.append("")
-
-        return "\n".join(lines) + "\n"
+        object_classes = [
+            "top",
+            "person",
+            "organizationalPerson",
+            "inetOrgPerson",
+            "posixAccount",
+            "goauthentik-io-ldap-user",
+            "extensibleObject",
+        ]
+        return dn, object_classes, attrs
 
     def _build_group_entry(
         self, group: dict[str, Any], members: dict[str, list[str]]
-    ) -> str:
+    ) -> tuple[str, list[str], dict[str, Any]] | None:
         group_name = group.get("name", "")
         if not group_name:
-            return ""
+            return None
 
         dn = f"cn={group_name},ou=groups,{self.base_dn}"
         gid_raw = group.get("pk", "")
         attrs = group.get("attributes", {})
 
-        lines = [
-            f"dn: {dn}",
-            "objectClass: top",
-            "objectClass: groupOfNames",
-            "objectClass: posixGroup",
-            "objectClass: goauthentik-io-ldap-group",
-            "objectClass: extensibleObject",
-            f"cn: {group_name}",
-        ]
+        entry_attrs: dict[str, Any] = {
+            "cn": group_name,
+        }
 
         # gidNumber: hash UUID strings, offset ints
         if isinstance(gid_raw, str):
-            lines.append(f"gidNumber: {abs(hash(gid_raw)) % 60000 + 10000}")
+            entry_attrs["gidNumber"] = str(abs(hash(gid_raw)) % 60000 + 10000)
         else:
-            lines.append(f"gidNumber: {gid_raw + 20000}")
+            entry_attrs["gidNumber"] = str(gid_raw + 20000)
 
         # Members
         member_names = members.get(group.get("pk", ""), [])
         if member_names:
-            for uname in member_names:
-                lines.append(f"member: cn={uname},ou=users,{self.base_dn}")
+            entry_attrs["member"] = [
+                f"cn={uname},ou=users,{self.base_dn}" for uname in member_names
+            ]
         else:
-            lines.append(f"member: cn=_placeholder,ou=users,{self.base_dn}")
+            entry_attrs["member"] = f"cn=_placeholder,ou=users,{self.base_dn}"
 
         # Custom attributes pass-through (skip invalid LDAP attr names)
         for key, value in attrs.items():
             if not _VALID_ATTR_NAME.match(key):
                 continue
             if isinstance(value, list):
-                for v in value:
-                    if v is not None and v != "":
-                        lines.append(f"{key}: {v}")
+                cleaned = [str(v) for v in value if v is not None and v != ""]
+                if cleaned:
+                    entry_attrs[key] = cleaned
             elif isinstance(value, bool):
-                lines.append(f"{key}: {'TRUE' if value else 'FALSE'}")
-            elif isinstance(value, object):
-                lines.append(f"{key}: {str(value)}")
+                entry_attrs[key] = "TRUE" if value else "FALSE"
             elif value is not None and value != "":
-                lines.append(f"{key}: {value}")
+                entry_attrs[key] = str(value)
 
-        lines.append("")
-        return "\n".join(lines) + "\n"
+        object_classes = [
+            "top",
+            "groupOfNames",
+            "posixGroup",
+            "goauthentik-io-ldap-group",
+            "extensibleObject",
+        ]
+        return dn, object_classes, entry_attrs
 
-    # ----- LDAP operations -----
+    # ----- LDAP operations (ldapi + EXTERNAL) -----
 
-    def _ldap_add(self, ldif: str) -> int:
-        result = subprocess.run(
-            [
-                "ldapadd", "-x", "-H", self.ldap_uri,
-                "-D", self.bind_dn, "-w", self.bind_pw, "-c",
-            ],
-            input=ldif.encode("utf-8"),
-            capture_output=True,
-        )
-        if result.returncode not in (0, 68):  # 68 = already exists
-            stderr = result.stderr.decode("utf-8", errors="replace")
-            if "Already exists" not in stderr:
-                log.warning("ldapadd returned %d: %s", result.returncode, stderr[:500])
-        return result.returncode
+    def _connect(self) -> Connection:
+        last_error: Exception | None = None
+        for uri in self._candidate_uris():
+            try:
+                server = Server(uri, get_info=None)
+                conn = Connection(
+                    server,
+                    authentication=SASL,
+                    sasl_mechanism=EXTERNAL,
+                    sasl_credentials="",
+                    auto_bind=False,
+                    check_names=False,
+                    raise_exceptions=False,
+                )
 
-    def _ldap_add_entry(self, ldif: str) -> bool:
-        """Add a single LDIF entry, stripping undefined attributes on retry."""
+                for _ in range(3):
+                    if conn.bind():
+                        self.ldap_uri = uri
+                        return conn
+                    code = int((conn.result or {}).get("result", -1))
+                    if code == 14:
+                        continue
+                    raise RuntimeError(f"LDAP bind failed for {uri}: {conn.result}")
+
+                raise RuntimeError(f"LDAP bind did not complete for {uri}: {conn.result}")
+            except Exception as exc:
+                last_error = exc
+                log.debug("LDAP connect failed for %s: %s", uri, exc)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No LDAP URI candidates available")
+
+    def _create_base_structure(self, conn: Connection) -> None:
+        for dn, object_classes, attrs in self._build_base_entries():
+            self._ldap_add_entry(conn, (dn, object_classes, attrs))
+
+    def _ldap_add_entry(
+        self,
+        conn: Connection,
+        entry: tuple[str, list[str], dict[str, Any]],
+    ) -> bool:
+        """Add a single entry, stripping undefined attributes on retry."""
+        dn, object_classes, attrs = entry
+        current_attrs = copy.deepcopy(attrs)
         all_bad: set[str] = set()
-        current = ldif
         for _ in range(5):  # max retries
-            result = subprocess.run(
-                [
-                    "ldapadd", "-x", "-H", self.ldap_uri,
-                    "-D", self.bind_dn, "-w", self.bind_pw,
-                ],
-                input=current.encode("utf-8"),
-                capture_output=True,
-            )
-            if result.returncode in (0, 68):
+            if conn.add(dn, object_class=object_classes, attributes=current_attrs):
                 return True
-            if result.returncode != 17:
-                stderr = result.stderr.decode("utf-8", errors="replace")
-                if "Already exists" not in stderr:
-                    log.warning("ldapadd returned %d: %s", result.returncode, stderr[:300])
+            result = conn.result
+            code = result.get("result", -1)
+            if code == 68:
+                return True
+            if code != 17:
+                msg = result.get("message", "")
+                if "Already exists" not in msg:
+                    log.warning("ldap add for %s returned %s: %s", dn, code, msg[:300])
                 return False
-            # Parse bad attribute name from stderr (undefined or invalid chars)
-            stderr = result.stderr.decode("utf-8", errors="replace")
+            # Parse bad attribute name from server result
+            msg = f"{result.get('message', '')} {result.get('description', '')}"
             new_bad: set[str] = set()
-            for line in stderr.splitlines():
-                if "attribute type undefined" in line or "inappropriate characters" in line:
-                    parts = line.split("additional info: ", 1)
-                    if len(parts) == 2:
-                        attr_name = parts[1].split(":")[0].strip()
-                        if attr_name and attr_name not in all_bad:
-                            new_bad.add(attr_name)
+            for attr_name, _reason in _BAD_ATTR_RE.findall(msg):
+                if attr_name not in all_bad:
+                    new_bad.add(attr_name)
             if not new_bad:
                 return False
             all_bad.update(new_bad)
             log.info("Stripping undefined attrs: %s", ", ".join(sorted(all_bad)))
-            filtered = []
-            for line in ldif.splitlines():
-                if any(
-                    line.startswith(f"{a}: ") or line.startswith(f"{a}:: ")
-                    for a in all_bad
-                ):
-                    continue
-                filtered.append(line)
-            current = "\n".join(filtered) + "\n"
+            for bad_attr in all_bad:
+                current_attrs.pop(bad_attr, None)
         return False
 
-    def _wipe_entries(self) -> None:
+    def _wipe_entries(self, conn: Connection) -> None:
         """Delete all entries under base DN (deepest first)."""
         log.info("Deleting existing LDAP entries...")
-        result = subprocess.run(
-            [
-                "ldapsearch", "-x", "-H", self.ldap_uri,
-                "-D", self.bind_dn, "-w", self.bind_pw,
-                "-b", self.base_dn, "-s", "sub", "dn", "-LLL",
-            ],
-            capture_output=True,
-        )
-        if result.returncode != 0:
+        if not conn.search(
+            search_base=self.base_dn,
+            search_filter="(objectClass=*)",
+            search_scope=SUBTREE,
+            attributes=ALL_ATTRIBUTES,
+        ):
             return
 
-        dns: list[str] = []
-        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
-            if line.startswith("dn: "):
-                dns.append(line[4:])
+        dns: list[str] = [entry.entry_dn for entry in conn.entries]
 
-        # Delete deepest first
-        dns.reverse()
+        # Delete deepest first, keep base DN to be recreated explicitly.
+        dns = [dn for dn in dns if dn.lower() != self.base_dn.lower()]
+        dns.sort(key=lambda dn: dn.count(","), reverse=True)
         for dn in dns:
-            subprocess.run(
-                [
-                    "ldapdelete", "-x", "-H", self.ldap_uri,
-                    "-D", self.bind_dn, "-w", self.bind_pw, dn,
-                ],
-                capture_output=True,
-            )
+            conn.delete(dn)
 
     def _wait_for_slapd(self, timeout: int = 120) -> bool:
         """Wait until slapd is accepting connections."""
         log.info("Waiting for slapd at %s ...", self.ldap_uri)
         for _ in range(timeout):
-            result = subprocess.run(
-                [
-                    "ldapsearch", "-x", "-H", self.ldap_uri,
-                    "-b", "", "-s", "base", "objectClass=*", "-LLL",
-                ],
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                log.info("slapd is ready.")
-                return True
+            conn: Connection | None = None
+            try:
+                conn = self._connect()
+                if conn.search(
+                    search_base="",
+                    search_filter="(objectClass=*)",
+                    search_scope=BASE,
+                    attributes=[],
+                ):
+                    log.info("slapd is ready.")
+                    return True
+            except Exception as exc:
+                log.debug("slapd not ready yet: %s", exc)
+            finally:
+                if conn is not None:
+                    conn.unbind()
             time.sleep(1)
         log.error("Timed out waiting for slapd.")
         return False
@@ -364,14 +392,11 @@ def main() -> None:
     token = os.environ["AUTHENTIK_TOKEN"]
     verify_tls = os.environ.get("VERIFY_TLS", "true").lower() == "true"
     base_dn = os.environ.get("LDAP_BASE_DN", "DC=ldap,DC=goauthentik,DC=io")
-    admin_pw = os.environ.get("LDAP_ADMIN_PASSWORD", "admin")
-    bind_dn = f"cn=admin,{base_dn}"
-    ldap_port = os.environ.get("LDAP_PORT", "3389")
-    ldap_uri = f"ldap://localhost:{ldap_port}"
+    ldap_uri = os.environ.get("LDAP_IPC_URI", "ldapi:///")
     interval = int(os.environ.get("SYNC_INTERVAL", "300"))
 
     client = AuthentikClient(url, token, verify_tls)
-    sync = LDAPSync(client, base_dn, bind_dn, admin_pw, ldap_uri)
+    sync = LDAPSync(client, base_dn, ldap_uri)
     sync.run_forever(interval)
 
 

@@ -1,0 +1,10 @@
+[project]
+name = "openldap-authentik-sync"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "ldap3>=2.9",
+]
+
+[tool.uv]
+package = false

@@ -12,8 +12,6 @@ cd "$(dirname "$0")"
 
 COMPOSE="docker compose -f docker-compose.test.yml -p ak-ldap-test"
 LDAP_URI="ldap://localhost:3389"
-ADMIN_DN="cn=admin,DC=ldap,DC=goauthentik,DC=io"
-ADMIN_PW="testpassword"
 BASE_DN="DC=ldap,DC=goauthentik,DC=io"
 
 PASS=0
@@ -35,7 +33,7 @@ assert_count() {
 
     TESTS=$((TESTS + 1))
     local output
-    output=$(ldapsearch -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" \
+    output=$(ldapsearch -x -H "$LDAP_URI" \
         -b "$search_base" "$filter" dn -LLL 2>/dev/null)
     local count
     count=$(echo "$output" | grep -c "^dn:" || true)
@@ -59,7 +57,7 @@ assert_attr() {
 
     TESTS=$((TESTS + 1))
     local output
-    output=$(ldapsearch -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" \
+    output=$(ldapsearch -x -H "$LDAP_URI" \
         -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
 
     # Check plain text match first, then try base64-decoded values
@@ -87,7 +85,7 @@ assert_attr_count() {
 
     TESTS=$((TESTS + 1))
     local output
-    output=$(ldapsearch -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" \
+    output=$(ldapsearch -x -H "$LDAP_URI" \
         -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
     local count
     count=$(echo "$output" | grep -ci "^$attr:" || true)
@@ -163,8 +161,18 @@ assert_attr_count "bob has 1 mailAlias" "cn=bob,ou=users,$BASE_DN" "mailAlias" 1
 assert_attr "alice active (loginShell)" "cn=alice,ou=users,$BASE_DN" "loginShell" "/bin/bash"
 assert_attr "charlie inactive (loginShell)" "cn=charlie,ou=users,$BASE_DN" "loginShell" "/sbin/nologin"
 
-# SASL password
-assert_attr "alice SASL password" "cn=alice,ou=users,$BASE_DN" "userPassword" "{SASL}alice@authentik"
+# SASL password should not be readable anonymously
+TESTS=$((TESTS + 1))
+pw_output=$(ldapsearch -x -H "$LDAP_URI" \
+    -b "cn=alice,ou=users,$BASE_DN" -s base "(objectClass=*)" "userPassword" -LLL 2>/dev/null)
+if echo "$pw_output" | grep -qi "^userPassword:"; then
+    echo "  FAIL: alice userPassword should not be readable anonymously"
+    echo "        output: $pw_output"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: alice userPassword is not readable anonymously"
+    PASS=$((PASS + 1))
+fi
 
 # Custom attribute pass-through: mailList
 assert_attr "alice mailList" "cn=alice,ou=users,$BASE_DN" "mailList" "dev-announce@test.local"
@@ -214,7 +222,7 @@ echo "--- Search scopes ---"
 # -------------------------------------------------------------------------
 # Subtree search from base should find everything
 TESTS=$((TESTS + 1))
-subtree_count=$(ldapsearch -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" \
+subtree_count=$(ldapsearch -x -H "$LDAP_URI" \
     -b "$BASE_DN" -s sub "(objectClass=*)" dn -LLL 2>/dev/null | grep -c "^dn:" || true)
 if [ "$subtree_count" -ge 9 ]; then  # base + 2 OUs + 3 users + 3 groups
     echo "  PASS: Subtree search from base (found $subtree_count entries)"
@@ -229,7 +237,7 @@ assert_count "One-level search in ou=users" 3 "(objectClass=posixAccount)" "ou=u
 
 # Base scope on a specific user
 TESTS=$((TESTS + 1))
-base_output=$(ldapsearch -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" \
+base_output=$(ldapsearch -x -H "$LDAP_URI" \
     -b "cn=alice,ou=users,$BASE_DN" -s base "(objectClass=*)" cn -LLL 2>/dev/null)
 if echo "$base_output" | grep -q "cn: alice"; then
     echo "  PASS: Base scope search on alice"
@@ -266,13 +274,13 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Admin bind
+# Admin bind must fail (admin user removed)
 TESTS=$((TESTS + 1))
-if ldapwhoami -x -H "$LDAP_URI" -D "$ADMIN_DN" -w "$ADMIN_PW" 2>/dev/null | grep -q "dn:"; then
-    echo "  PASS: Admin BIND"
+if ! ldapwhoami -x -H "$LDAP_URI" -D "cn=admin,$BASE_DN" -w "testpassword" 2>/dev/null | grep -q "dn:"; then
+    echo "  PASS: Admin BIND rejected"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: Admin BIND failed"
+    echo "  FAIL: Admin BIND unexpectedly succeeded"
     FAIL=$((FAIL + 1))
 fi
 

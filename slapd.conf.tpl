@@ -28,21 +28,19 @@ argsfile    /var/run/slapd/slapd.args
 
 # ---- Access Control ----
 access to attrs=userPassword
-    by dn.exact="cn=admin,%%BASE_DN%%" write
+    by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
     by self read
     by anonymous auth
     by * none
 
 access to *
-    by dn.exact="cn=admin,%%BASE_DN%%" write
+    by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
     by users read
     by anonymous read
 
 # ---- Database ----
 database    mdb
 suffix      "%%BASE_DN%%"
-rootdn      "cn=admin,%%BASE_DN%%"
-rootpw      %%ROOT_PW_HASH%%
 
 maxsize     1073741824
 directory   /var/lib/ldap
