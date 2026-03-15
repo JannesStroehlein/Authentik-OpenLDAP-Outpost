@@ -100,6 +100,26 @@ assert_attr_count() {
     fi
 }
 
+assert_no_attr() {
+    local description="$1"
+    local dn="$2"
+    local attr="$3"
+
+    TESTS=$((TESTS + 1))
+    local output
+    output=$(ldapsearch -x -H "$LDAP_URI" \
+        -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
+
+    if echo "$output" | grep -qi "^$attr:"; then
+        echo "  FAIL: $description (unexpected attribute '$attr' present)"
+        echo "        output: $output"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: $description"
+        PASS=$((PASS + 1))
+    fi
+}
+
 # =========================================================================
 echo "=== Building and starting test environment ==="
 # =========================================================================
@@ -176,6 +196,11 @@ fi
 
 # Custom attribute pass-through: mailList
 assert_attr "alice mailList" "cn=alice,ou=users,$BASE_DN" "mailList" "dev-announce@test.local"
+assert_no_attr "alice unsupported bool attr dropped" "cn=alice,ou=users,$BASE_DN" "isSuperuser"
+assert_attr "alice employeeNumber passthrough" "cn=alice,ou=users,$BASE_DN" "employeeNumber" "1001"
+assert_no_attr "alice unsupported list attr dropped" "cn=alice,ou=users,$BASE_DN" "departmentCodes"
+assert_no_attr "alice unsupported nested attr dropped" "cn=alice,ou=users,$BASE_DN" "profile"
+assert_no_attr "alice invalid attr dropped" "cn=alice,ou=users,$BASE_DN" "webauthn_devices"
 
 # -------------------------------------------------------------------------
 echo ""
@@ -195,6 +220,10 @@ assert_attr_count "empty-group has placeholder member" "cn=empty-group,ou=groups
 assert_attr "empty-group placeholder DN" "cn=empty-group,ou=groups,$BASE_DN" "member" "cn=_placeholder,ou=users,$BASE_DN"
 
 assert_attr "admins mailAlias" "cn=admins,ou=groups,$BASE_DN" "mailAlias" "admin-team@test.local"
+assert_no_attr "admins unsupported bool attr dropped" "cn=admins,ou=groups,$BASE_DN" "isPrivileged"
+assert_no_attr "admins unsupported int attr dropped" "cn=admins,ou=groups,$BASE_DN" "costCenter"
+assert_no_attr "admins unsupported list attr dropped" "cn=admins,ou=groups,$BASE_DN" "entitlements"
+assert_no_attr "admins unsupported nested attr dropped" "cn=admins,ou=groups,$BASE_DN" "authentikMeta"
 
 # -------------------------------------------------------------------------
 echo ""
@@ -258,9 +287,8 @@ if ldapwhoami -x -H "$LDAP_URI" \
     echo "  PASS: BIND alice with correct password"
     PASS=$((PASS + 1))
 else
-    # SASL pass-through auth might not be available in all test environments
-    echo "  SKIP: BIND alice (SASL pass-through may not be available in test)"
-    # Don't count as failure — SASL needs the mux socket + slapd SASL config working
+    echo "  FAIL: BIND alice with correct password"
+    FAIL=$((FAIL + 1))
 fi
 
 # Failed bind with wrong password

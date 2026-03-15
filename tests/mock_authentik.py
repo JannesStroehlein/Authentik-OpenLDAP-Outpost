@@ -21,6 +21,11 @@ USERS = {
             "attributes": {
                 "mailAlias": ["alice.admin@test.local", "a@test.local"],
                 "mailList": "dev-announce@test.local",
+                "isSuperuser": True,
+                "employeeNumber": 1001,
+                "departmentCodes": ["ENG", "PLATFORM", 7],
+                "profile": {"timezone": "Europe/Berlin", "locale": "en-US"},
+                "webauthn_devices": 2,
             },
         },
         {
@@ -53,6 +58,10 @@ GROUPS = {
             "attributes": {
                 "systemMail": "admins@test.local",
                 "mailAlias": ["admin-team@test.local"],
+                "isPrivileged": True,
+                "costCenter": 9001,
+                "entitlements": ["vpn", "k8s-admin"],
+                "authentikMeta": {"owner": "security", "tier": 1},
             },
             "users_obj": [
                 {"pk": 1, "username": "alice"},

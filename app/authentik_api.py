@@ -53,14 +53,17 @@ class AuthentikClient:
         """
         base = f"{self.url}/api/v3/flows/executor/{flow_slug}/"
         jar = CookieJar()
-        opener = urllib.request.build_opener(
+        handlers: list[urllib.request.BaseHandler] = [
             urllib.request.HTTPCookieProcessor(jar),
-        )
+        ]
+        if self.ssl_ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self.ssl_ctx))
+        opener = urllib.request.build_opener(*handlers)
 
         try:
             # Step 1: GET the flow — expect identification challenge
             req = self._flow_request(base)
-            with opener.open(req, context=self.ssl_ctx) if self.ssl_ctx else opener.open(req) as resp:
+            with opener.open(req) as resp:
                 stage = json.loads(resp.read().decode())
 
             if stage.get("component") != "ak-stage-identification":
@@ -70,7 +73,7 @@ class AuthentikClient:
             # Step 2: POST username — expect password challenge
             payload = json.dumps({"uid_field": username}).encode()
             req = self._flow_request(base, data=payload)
-            with opener.open(req, context=self.ssl_ctx) if self.ssl_ctx else opener.open(req) as resp:
+            with opener.open(req) as resp:
                 stage = json.loads(resp.read().decode())
 
             if stage.get("component") != "ak-stage-password":
@@ -80,7 +83,7 @@ class AuthentikClient:
             # Step 3: POST password — success = redirect, failure = access-denied
             payload = json.dumps({"password": password}).encode()
             req = self._flow_request(base, data=payload)
-            with opener.open(req, context=self.ssl_ctx) if self.ssl_ctx else opener.open(req) as resp:
+            with opener.open(req) as resp:
                 stage = json.loads(resp.read().decode())
 
             component = stage.get("component", "")
