@@ -1,0 +1,30 @@
+services:
+  mock-authentik:
+    image: python:3.12-slim
+    volumes:
+      - ./mock_authentik.py:/app/mock_authentik.py:ro
+    command: python3 -u /app/mock_authentik.py
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v3/core/users/?page_size=500')"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  openldap:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    environment:
+      LDAP_ADMIN_PASSWORD: testpassword
+      AUTHENTIK_URL: http://mock-authentik:8080
+      AUTHENTIK_TOKEN: fake-token
+      AUTHENTIK_AUTH_FLOW_SLUG: default-authentication-flow
+      LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
+      LDAP_PORT: "389"
+      SYNC_INTERVAL: "3600"
+      BIND_CACHE_TTL: "300"
+      LOG_LEVEL: DEBUG
+      VERIFY_TLS: "false"
+    depends_on:
+      mock-authentik:
+        condition: service_healthy

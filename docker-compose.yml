@@ -1,0 +1,22 @@
+services:
+  ldap:
+    build: .
+    restart: unless-stopped
+    environment:
+      AUTHENTIK_URL: ${AUTHENTIK_URL}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN}
+      AUTHENTIK_AUTH_FLOW_SLUG: default-authentication-flow
+      LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:-admin}
+      LDAP_PORT: "3389"
+      SYNC_INTERVAL: "300"
+      BIND_CACHE_TTL: "300"
+      VERIFY_TLS: "true"
+      LOG_LEVEL: INFO
+    ports:
+      - "3389:3389"
+    volumes:
+      - ldap_data:/var/lib/ldap
+
+volumes:
+  ldap_data:
