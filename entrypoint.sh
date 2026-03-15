@@ -7,6 +7,7 @@ set -e
 LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=goauthentik,DC=io}"
 LDAP_PORT="${LDAP_PORT:-3389}"
 SLAPD_LOG_LEVEL="${SLAPD_LOG_LEVEL:-256}"
+SLAPD_CONFIG_DIR="${SLAPD_CONFIG_DIR:-/var/lib/ldap/slapd.d}"
 
 # ---------------------------------------------------------------------------
 # 1. Generate slapd.conf from template
@@ -23,6 +24,15 @@ echo "Generated slapd.conf (base DN: ${LDAP_BASE_DN})"
 # ---------------------------------------------------------------------------
 chown -R openldap:openldap /var/lib/ldap /var/run/slapd
 mkdir -p /var/run/saslauthd
+
+# ---------------------------------------------------------------------------
+# 2.1 Regenerate dynamic cn=config from template on each startup
+# ---------------------------------------------------------------------------
+echo "Rendering dynamic config at $SLAPD_CONFIG_DIR ..."
+rm -rf "$SLAPD_CONFIG_DIR"
+mkdir -p "$SLAPD_CONFIG_DIR"
+slaptest -f /etc/ldap/slapd.conf -F "$SLAPD_CONFIG_DIR"
+chown -R openldap:openldap "$SLAPD_CONFIG_DIR"
 
 # ---------------------------------------------------------------------------
 # 3. Start auth_server.py (replaces saslauthd)
@@ -50,7 +60,7 @@ fi
 echo "Starting slapd on port ${LDAP_PORT}..."
 /usr/sbin/slapd \
     -h "ldap://0.0.0.0:${LDAP_PORT}/ ldapi:///" \
-    -f /etc/ldap/slapd.conf \
+    -F "$SLAPD_CONFIG_DIR" \
     -u openldap \
     -g openldap \
     -d "${SLAPD_LOG_LEVEL}" &

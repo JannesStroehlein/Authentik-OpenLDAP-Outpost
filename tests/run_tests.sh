@@ -196,10 +196,10 @@ fi
 
 # Custom attribute pass-through: mailList
 assert_attr "alice mailList" "cn=alice,ou=users,$BASE_DN" "mailList" "dev-announce@test.local"
-assert_no_attr "alice unsupported bool attr dropped" "cn=alice,ou=users,$BASE_DN" "isSuperuser"
+assert_attr "alice isSuperuser bool" "cn=alice,ou=users,$BASE_DN" "isSuperuser" "TRUE"
 assert_attr "alice employeeNumber passthrough" "cn=alice,ou=users,$BASE_DN" "employeeNumber" "1001"
-assert_no_attr "alice unsupported list attr dropped" "cn=alice,ou=users,$BASE_DN" "departmentCodes"
-assert_no_attr "alice unsupported nested attr dropped" "cn=alice,ou=users,$BASE_DN" "profile"
+assert_attr_count "alice has 3 departmentCodes" "cn=alice,ou=users,$BASE_DN" "departmentCodes" 3
+assert_attr "alice profile serialized" "cn=alice,ou=users,$BASE_DN" "profile" "{\"locale\":\"en-US\",\"timezone\":\"Europe/Berlin\"}"
 assert_no_attr "alice invalid attr dropped" "cn=alice,ou=users,$BASE_DN" "webauthn_devices"
 
 # -------------------------------------------------------------------------
@@ -220,10 +220,10 @@ assert_attr_count "empty-group has placeholder member" "cn=empty-group,ou=groups
 assert_attr "empty-group placeholder DN" "cn=empty-group,ou=groups,$BASE_DN" "member" "cn=_placeholder,ou=users,$BASE_DN"
 
 assert_attr "admins mailAlias" "cn=admins,ou=groups,$BASE_DN" "mailAlias" "admin-team@test.local"
-assert_no_attr "admins unsupported bool attr dropped" "cn=admins,ou=groups,$BASE_DN" "isPrivileged"
-assert_no_attr "admins unsupported int attr dropped" "cn=admins,ou=groups,$BASE_DN" "costCenter"
-assert_no_attr "admins unsupported list attr dropped" "cn=admins,ou=groups,$BASE_DN" "entitlements"
-assert_no_attr "admins unsupported nested attr dropped" "cn=admins,ou=groups,$BASE_DN" "authentikMeta"
+assert_attr "admins isPrivileged bool" "cn=admins,ou=groups,$BASE_DN" "isPrivileged" "TRUE"
+assert_attr "admins costCenter int" "cn=admins,ou=groups,$BASE_DN" "costCenter" "9001"
+assert_attr_count "admins has 2 entitlements" "cn=admins,ou=groups,$BASE_DN" "entitlements" 2
+assert_attr "admins authentikMeta serialized" "cn=admins,ou=groups,$BASE_DN" "authentikMeta" "{\"owner\":\"security\",\"tier\":1}"
 
 # -------------------------------------------------------------------------
 echo ""

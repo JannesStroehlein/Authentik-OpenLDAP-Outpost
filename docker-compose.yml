@@ -5,7 +5,7 @@ services:
     environment:
       AUTHENTIK_URL: ${AUTHENTIK_URL}
       AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN}
-      AUTHENTIK_AUTH_FLOW_SLUG: default-authentication-flow
+      AUTHENTIK_AUTH_FLOW_SLUG: ldap-authentication-flow
       LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
       LDAP_PORT: "3389"
       SYNC_INTERVAL: "300"

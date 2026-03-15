@@ -27,6 +27,18 @@ pidfile     /var/run/slapd/slapd.pid
 argsfile    /var/run/slapd/slapd.args
 
 # ---- Access Control ----
+# Runtime config DB (cn=config): allow local EXTERNAL root to manage schema.
+database    config
+rootdn      "cn=admin,cn=config"
+access to *
+    by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage
+    by * none
+
+# ---- Database ----
+database    mdb
+suffix      "%%BASE_DN%%"
+
+# Main data DB ACLs
 access to attrs=userPassword
     by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
     by self read
@@ -37,10 +49,6 @@ access to *
     by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
     by users read
     by anonymous read
-
-# ---- Database ----
-database    mdb
-suffix      "%%BASE_DN%%"
 
 maxsize     1073741824
 directory   /var/lib/ldap

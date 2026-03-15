@@ -8,6 +8,8 @@ Custom user/group attributes are passed through via extensibleObject.
 """
 
 import copy
+import hashlib
+import json
 import logging
 import os
 import re
@@ -18,6 +20,7 @@ from typing import Any
 from ldap3 import (
     ALL_ATTRIBUTES,
     BASE,
+    MODIFY_ADD,
     SUBTREE,
     Connection,
     SASL,
@@ -35,6 +38,16 @@ _BAD_ATTR_RE = re.compile(
     r"([a-zA-Z][a-zA-Z0-9-]*)\s*:\s*(attribute type undefined|inappropriate characters)",
     re.IGNORECASE,
 )
+_ATTR_OID_PREFIX = "1.3.6.1.4.1.55555.1"
+
+_BUILTIN_USER_ATTRS = {
+    "cn", "uid", "sn", "displayName", "uidNumber", "gidNumber",
+    "homeDirectory", "loginShell", "userPassword", "givenName", "mail",
+}
+
+_BUILTIN_GROUP_ATTRS = {"cn", "gidNumber", "member"}
+_BUILTIN_USER_ATTRS_LOWER = {attr.lower() for attr in _BUILTIN_USER_ATTRS}
+_BUILTIN_GROUP_ATTRS_LOWER = {attr.lower() for attr in _BUILTIN_GROUP_ATTRS}
 
 
 class LDAPSync:
@@ -107,6 +120,9 @@ class LDAPSync:
         conn: Connection | None = None
         try:
             conn = self._connect()
+
+            # Ensure schema exists for authentik custom attributes.
+            self._ensure_dynamic_schema(conn, users, groups)
 
             # Wipe existing entries
             self._wipe_entries(conn)
@@ -187,18 +203,9 @@ class LDAPSync:
         if email:
             attrs["mail"] = email
 
-        # Custom attributes pass-through (skip invalid LDAP attr names)
-        for key, value in custom_attrs.items():
-            if not _VALID_ATTR_NAME.match(key):
-                continue
-            if isinstance(value, list):
-                cleaned = [str(v) for v in value if v is not None and v != ""]
-                if cleaned:
-                    attrs[key] = cleaned
-            elif isinstance(value, bool):
-                attrs[key] = "TRUE" if value else "FALSE"
-            elif value is not None and value != "":
-                attrs[key] = str(value)
+        # Custom attributes pass-through (case-insensitive key merge)
+        for key, values in self._normalized_custom_attrs(custom_attrs, _BUILTIN_USER_ATTRS_LOWER).items():
+            attrs[key] = values[0] if len(values) == 1 else values
 
         object_classes = [
             "top",
@@ -241,18 +248,9 @@ class LDAPSync:
         else:
             entry_attrs["member"] = f"cn=_placeholder,ou=users,{self.base_dn}"
 
-        # Custom attributes pass-through (skip invalid LDAP attr names)
-        for key, value in attrs.items():
-            if not _VALID_ATTR_NAME.match(key):
-                continue
-            if isinstance(value, list):
-                cleaned = [str(v) for v in value if v is not None and v != ""]
-                if cleaned:
-                    entry_attrs[key] = cleaned
-            elif isinstance(value, bool):
-                entry_attrs[key] = "TRUE" if value else "FALSE"
-            elif value is not None and value != "":
-                entry_attrs[key] = str(value)
+        # Custom attributes pass-through (case-insensitive key merge)
+        for key, values in self._normalized_custom_attrs(attrs, _BUILTIN_GROUP_ATTRS_LOWER).items():
+            entry_attrs[key] = values[0] if len(values) == 1 else values
 
         object_classes = [
             "top",
@@ -264,6 +262,176 @@ class LDAPSync:
         return dn, object_classes, entry_attrs
 
     # ----- LDAP operations (ldapi + EXTERNAL) -----
+
+    @staticmethod
+    def _to_ldap_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return str(value)
+
+    def _normalized_custom_attrs(
+        self,
+        raw_attrs: dict[str, Any],
+        builtin_lower: set[str],
+    ) -> dict[str, list[str]]:
+        canonical_name_by_lower: dict[str, str] = {}
+        merged: dict[str, list[str]] = {}
+
+        for key, value in raw_attrs.items():
+            if not _VALID_ATTR_NAME.match(key):
+                continue
+
+            key_lower = key.lower()
+            if key_lower in builtin_lower:
+                continue
+
+            canonical = canonical_name_by_lower.setdefault(key_lower, key)
+
+            if isinstance(value, list):
+                values = [self._to_ldap_value(v) for v in value if v is not None and v != ""]
+            elif value is None or value == "":
+                values = []
+            else:
+                values = [self._to_ldap_value(value)]
+
+            if not values:
+                continue
+
+            target = merged.setdefault(canonical, [])
+            for item in values:
+                if item not in target:
+                    target.append(item)
+
+        return merged
+
+    @staticmethod
+    def _parse_attr_names(attr_type: str) -> set[str]:
+        names: set[str] = set()
+        multi = re.search(r"\bNAME\s+\(([^)]*)\)", attr_type)
+        if multi:
+            for match in re.findall(r"'([^']+)'", multi.group(1)):
+                names.add(match)
+            return names
+        single = re.search(r"\bNAME\s+'([^']+)'", attr_type)
+        if single:
+            names.add(single.group(1))
+        return names
+
+    @staticmethod
+    def _parse_attr_oid(attr_type: str) -> str | None:
+        match = re.match(r"\s*\(\s*([0-9.]+)", attr_type)
+        if not match:
+            return None
+        return match.group(1)
+
+    def _schema_state(self, conn: Connection) -> tuple[set[str], set[str]]:
+        if not conn.search(
+            search_base="cn=Subschema",
+            search_filter="(objectClass=subschema)",
+            search_scope=BASE,
+            attributes=["attributeTypes"],
+        ):
+            return set(), set()
+
+        name_set: set[str] = set()
+        oid_set: set[str] = set()
+        for entry in conn.entries:
+            for attr_type in entry["attributeTypes"].values:
+                name_set.update(self._parse_attr_names(str(attr_type)))
+                oid = self._parse_attr_oid(str(attr_type))
+                if oid:
+                    oid_set.add(oid)
+        return name_set, oid_set
+
+    def _desired_custom_attr_names(
+        self,
+        users: list[dict[str, Any]],
+        groups: list[dict[str, Any]],
+    ) -> set[str]:
+        canonical_name_by_lower: dict[str, str] = {}
+        for user in users:
+            for key in (user.get("attributes", {}) or {}).keys():
+                if not _VALID_ATTR_NAME.match(key):
+                    continue
+                key_lower = key.lower()
+                if key_lower in _BUILTIN_USER_ATTRS_LOWER:
+                    continue
+                canonical_name_by_lower.setdefault(key_lower, key)
+        for group in groups:
+            for key in (group.get("attributes", {}) or {}).keys():
+                if not _VALID_ATTR_NAME.match(key):
+                    continue
+                key_lower = key.lower()
+                if key_lower in _BUILTIN_GROUP_ATTRS_LOWER:
+                    continue
+                canonical_name_by_lower.setdefault(key_lower, key)
+        return set(canonical_name_by_lower.values())
+
+    @staticmethod
+    def _oid_for_name(name: str, used_oids: set[str]) -> str:
+        base_num = int.from_bytes(hashlib.sha1(name.encode("utf-8")).digest()[:4], "big")
+        candidate = base_num
+        while True:
+            oid = f"{_ATTR_OID_PREFIX}.{candidate}"
+            if oid not in used_oids:
+                return oid
+            candidate += 1
+
+    @staticmethod
+    def _attr_type_definition(name: str, oid: str) -> str:
+        return (
+            f"( {oid} NAME '{name}' "
+            "DESC 'Auto-generated from authentik custom attributes' "
+            "EQUALITY caseIgnoreMatch "
+            "SUBSTR caseIgnoreSubstringsMatch "
+            "SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )"
+        )
+
+    def _ensure_dynamic_schema(
+        self,
+        conn: Connection,
+        users: list[dict[str, Any]],
+        groups: list[dict[str, Any]],
+    ) -> None:
+        desired = self._desired_custom_attr_names(users, groups)
+        if not desired:
+            return
+
+        existing_names, used_oids = self._schema_state(conn)
+        existing_names_lower = {name.lower() for name in existing_names}
+        missing = sorted(name for name in desired if name.lower() not in existing_names_lower)
+        if not missing:
+            return
+
+        definitions: list[str] = []
+        for name in missing:
+            oid = self._oid_for_name(name, used_oids)
+            used_oids.add(oid)
+            definitions.append(self._attr_type_definition(name, oid))
+
+        if not conn.search(
+            search_base="cn=schema,cn=config",
+            search_filter="(cn=authentikDynamic)",
+            search_scope=SUBTREE,
+            attributes=["cn"],
+        ):
+            if not conn.add(
+                "cn=authentikDynamic,cn=schema,cn=config",
+                object_class=["top", "olcSchemaConfig"],
+                attributes={"cn": "authentikDynamic", "olcAttributeTypes": definitions},
+            ):
+                log.warning("Failed to create dynamic schema: %s", conn.result)
+                return
+            log.info("Created dynamic schema with %d attribute types", len(definitions))
+            return
+
+        schema_dn = conn.entries[0].entry_dn
+        if not conn.modify(schema_dn, {"olcAttributeTypes": [(MODIFY_ADD, definitions)]}):
+            log.warning("Failed to update dynamic schema: %s", conn.result)
+            return
+        log.info("Added %d dynamic attribute types", len(definitions))
 
     def _connect(self) -> Connection:
         last_error: Exception | None = None
