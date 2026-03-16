@@ -2,6 +2,19 @@
 set -e
 
 # ---------------------------------------------------------------------------
+# Disclaimer
+# ---------------------------------------------------------------------------
+echo "-----------------------------------------------[ WARNING ]-----------------------------------------------"
+echo "THIS IS AN EXPERIMENTAL PROJECT - PLEASE DO NOT USE IN PRODUCTION"
+echo "This project my contain high severity security vulnerabilities that could leak you Authentik directory"
+echo "or compromise your server."
+echo "Please review the project's code before running it."
+echo ""
+echo "If you find any vulnerabilities please report them to me."
+echo "GitHub: https://github.com/JannesStroehlein/Authentik-OpenLDAP-Outpost"
+echo "-----------------------------------------------[ WARNING ]-----------------------------------------------"
+
+# ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
 LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=goauthentik,DC=io}"

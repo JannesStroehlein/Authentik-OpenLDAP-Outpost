@@ -1,8 +1,22 @@
 # OpenLDAP Authentik Sync
 
-Bidirectional federation between [Authentik](https://goauthentik.io/) and a local OpenLDAP directory. Periodically syncs users and groups from the Authentik API into slapd, and delegates LDAP bind authentication back to Authentik via its flow executor.
+Mostly drop in replacement for the official Authentik LDAP outpost, which has frustrated me due to it's inability to respond correctly to the simplest of LDAP filter expressions (see [Authentik/#2756](https://github.com/goauthentik/authentik/issues/2756))
 
 This replaces the Authentik LDAP outpost with a self-managed OpenLDAP instance while maintaining compatibility with the outpost's schema and attribute layout.
+
+> [!CAUTION]
+> This project may contain high severity security vulnerabilities and leak your Authentik directory to the internet.
+> I don't give any guarantees that this project won't cause problems due to oversights on my part.
+
+## Features
+
+- Full LDAP filter support (including those mean `(|(objectClass=posixAccount)(objectClass=groupOfNames))` filters)
+- `memberOf` overlay for group membership attributes on user entries
+- single container deployment
+- dynamic schema generation for custom attributes from Authentik (only way OpenLDAP supports custom attributes)
+- TLS support for secure LDAP (LDAPS)
+- Access Control: only users in the configured group can read the full directory
+- Flow based authentication: bind requests are delegated to Authentik's flow executor
 
 ## How it works
 
@@ -34,6 +48,7 @@ docker compose up -d
 ```
 
 Test with:
+
 ```bash
 ldapsearch -x -H ldap://localhost:3389 -b "DC=ldap,DC=goauthentik,DC=io" "(objectClass=posixAccount)"
 ```
@@ -42,28 +57,28 @@ ldapsearch -x -H ldap://localhost:3389 -b "DC=ldap,DC=goauthentik,DC=io" "(objec
 
 All configuration is via environment variables:
 
-| Variable | Default | Description |
-|---|---|---|
-| `AUTHENTIK_URL` | *required* | Base URL of your Authentik instance |
-| `AUTHENTIK_TOKEN` | *required* | API token with read access to users/groups |
-| `AUTHENTIK_AUTH_FLOW_SLUG` | `default-authentication-flow` | Flow slug used for bind authentication |
-| `LDAP_BASE_DN` | `DC=ldap,DC=goauthentik,DC=io` | LDAP directory base DN |
-| `LDAP_PORT` | `3389` | LDAP listen port |
-| `LDAPS_PORT` | `6636` | LDAPS (TLS) listen port |
-| `SYNC_INTERVAL` | `300` | Seconds between sync cycles |
-| `BIND_CACHE_TTL` | `300` | Seconds to cache successful bind credentials |
-| `VERIFY_TLS` | `true` | Verify Authentik's TLS certificate |
-| `LOG_LEVEL` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| Variable                   | Default                        | Description                                            |
+| -------------------------- | ------------------------------ | ------------------------------------------------------ |
+| `AUTHENTIK_URL`            | _required_                     | Base URL of your Authentik instance                    |
+| `AUTHENTIK_TOKEN`          | _required_                     | API token with read access to users/groups             |
+| `AUTHENTIK_AUTH_FLOW_SLUG` | `default-authentication-flow`  | Flow slug used for bind authentication                 |
+| `LDAP_BASE_DN`             | `DC=ldap,DC=goauthentik,DC=io` | LDAP directory base DN                                 |
+| `LDAP_PORT`                | `3389`                         | LDAP listen port                                       |
+| `LDAPS_PORT`               | `6636`                         | LDAPS (TLS) listen port                                |
+| `SYNC_INTERVAL`            | `300`                          | Seconds between sync cycles                            |
+| `BIND_CACHE_TTL`           | `300`                          | Seconds to cache successful bind credentials           |
+| `VERIFY_TLS`               | `true`                         | Verify Authentik's TLS certificate                     |
+| `LOG_LEVEL`                | `INFO`                         | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ### TLS
 
 LDAPS is enabled by default. Without custom certificates, a self-signed certificate is generated on first start. To use your own:
 
-| Variable | Description |
-|---|---|
+| Variable        | Description                                     |
+| --------------- | ----------------------------------------------- |
 | `LDAP_TLS_CERT` | Path to TLS certificate file (inside container) |
-| `LDAP_TLS_KEY` | Path to TLS private key file |
-| `LDAP_TLS_CA` | Path to CA certificate file (optional) |
+| `LDAP_TLS_KEY`  | Path to TLS private key file                    |
+| `LDAP_TLS_CA`   | Path to CA certificate file (optional)          |
 
 Mount your certificate files into the container and set the paths.
 
