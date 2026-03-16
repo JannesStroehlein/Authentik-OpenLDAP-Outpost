@@ -227,6 +227,27 @@ assert_attr "admins authentikMeta serialized" "cn=admins,ou=groups,$BASE_DN" "au
 
 # -------------------------------------------------------------------------
 echo ""
+echo "--- memberOf (overlay) ---"
+# -------------------------------------------------------------------------
+# alice is in admins + developers
+assert_attr_count "alice has 2 memberOf" "cn=alice,ou=users,$BASE_DN" "memberOf" 2
+assert_attr "alice memberOf admins" "cn=alice,ou=users,$BASE_DN" "memberOf" "cn=admins,ou=groups,$BASE_DN"
+assert_attr "alice memberOf developers" "cn=alice,ou=users,$BASE_DN" "memberOf" "cn=developers,ou=groups,$BASE_DN"
+
+# bob is in admins only
+assert_attr_count "bob has 1 memberOf" "cn=bob,ou=users,$BASE_DN" "memberOf" 1
+assert_attr "bob memberOf admins" "cn=bob,ou=users,$BASE_DN" "memberOf" "cn=admins,ou=groups,$BASE_DN"
+
+# charlie is in developers only
+assert_attr_count "charlie has 1 memberOf" "cn=charlie,ou=users,$BASE_DN" "memberOf" 1
+assert_attr "charlie memberOf developers" "cn=charlie,ou=users,$BASE_DN" "memberOf" "cn=developers,ou=groups,$BASE_DN"
+
+# filter by memberOf
+assert_count "memberOf filter finds admins members" 2 \
+    "(memberOf=cn=admins,ou=groups,$BASE_DN)" "ou=users,$BASE_DN"
+
+# -------------------------------------------------------------------------
+echo ""
 echo "--- objectClass OR filter (the original bug) ---"
 # -------------------------------------------------------------------------
 assert_count \
