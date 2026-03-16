@@ -212,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
             session_id = self._get_or_create_session()
             _flow_sessions[session_id] = {"stage": "identification"}
             self._json_response(
-                {"component": "ak-stage-identification", "type": "native"},
+                {"component": "ak-stage-identification", "type": "native", "password_fields": True},
                 cookies={"ak_session": session_id},
             )
         else:
@@ -238,8 +238,22 @@ class Handler(BaseHTTPRequestHandler):
         session = _flow_sessions[session_id]
 
         if session["stage"] == "identification":
-            # Received username -> move to password stage
             session["username"] = body.get("uid_field", "")
+            if "password" in body:
+                # Inline password (password_fields: true) -> validate now
+                password = body["password"]
+                expected = VALID_USERS.get(session["username"])
+                del _flow_sessions[session_id]
+                if expected and password == expected:
+                    self._json_response(
+                        {"component": "xak-flow-redirect", "type": "redirect", "to": "/"}
+                    )
+                else:
+                    self._json_response(
+                        {"component": "ak-stage-access-denied", "type": "native"}
+                    )
+                return
+            # No password submitted -> move to separate password stage
             session["stage"] = "password"
             self._json_response(
                 {"component": "ak-stage-password", "type": "native"}

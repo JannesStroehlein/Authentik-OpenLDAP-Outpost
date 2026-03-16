@@ -155,7 +155,7 @@ class AuthentikClient:
                 if component == "ak-stage-access-denied":
                     return False
 
-                payload_dict = self._payload_for_stage(component, username, password)
+                payload_dict = self._payload_for_stage(stage, username, password)
                 if payload_dict is None:
                     log.warning("Unsupported flow stage for LDAP auth: %s", component)
                     return False
@@ -192,18 +192,23 @@ class AuthentikClient:
         return req
 
     @staticmethod
-    def _payload_for_stage(component: str, username: str, password: str) -> dict[str, Any] | None:
+    def _payload_for_stage(stage: dict, username: str, password: str) -> dict[str, Any] | None:
         """Build best-effort payload for common authentik stages.
 
-        Supports standard and ldap-auth-flow variations.
+        Supports standard and ldap-auth-flow variations, including
+        identification stages with an inline password_stage.
         """
+        component = str(stage.get("component", ""))
         component_lower = component.lower()
 
         if component == "ak-stage-identification" or "identification" in component_lower:
-            return {
+            payload: dict[str, Any] = {
                 "uid_field": username,
                 "username": username,
             }
+            if stage.get("password_fields"):
+                payload["password"] = password
+            return payload
 
         if component == "ak-stage-password" or "password" in component_lower:
             return {"password": password}
