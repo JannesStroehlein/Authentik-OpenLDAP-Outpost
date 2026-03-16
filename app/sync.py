@@ -8,6 +8,7 @@ Custom user/group attributes are passed through via extensibleObject.
 """
 
 import copy
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ import sys
 import time
 from typing import Any
 
+from authentik_client import Group, User
 from ldap3 import (
     ALL_ATTRIBUTES,
     BASE,
@@ -55,6 +57,11 @@ _UNSAFE_NAME_RE = re.compile(r"[\x00/]")
 # Max length for usernames and group names used in DNs
 _MAX_NAME_LENGTH = 256
 
+@dataclass
+class GroupWithMembers:
+    """Helper for group entries with member references resolved."""
+    group: dict[str, Any]
+    member_usernames: list[str]
 
 class LDAPSync:
     """Sync authentik users and groups into a local slapd."""
@@ -95,10 +102,8 @@ class LDAPSync:
         log.info("Starting sync from authentik API...")
 
         try:
-            users = self.client.get_paginated("/api/v3/core/users/?page_size=500")
-            groups = self.client.get_paginated(
-                "/api/v3/core/groups/?page_size=500&include_users=true"
-            )
+            users = self.get_all_users()
+            groups = self.get_all_groups()
         except Exception as exc:
             log.error("Failed to fetch from authentik: %s", exc)
             return False
@@ -106,21 +111,26 @@ class LDAPSync:
         log.info("Fetched %d users and %d groups", len(users), len(groups))
 
         # Build member mapping: group pk -> list of usernames
-        user_pk_to_name: dict[int, str] = {u["pk"]: u["username"] for u in users}
+        # Only include users that were actually fetched (exist in the directory)
+        # to avoid memberof overlay err=32 on non-existent entries.
+        user_pk_to_name: dict[int, str] = {u.pk: u.username for u in users}
+        known_usernames: set[str] = set(user_pk_to_name.values())
         members_by_group: dict[str, list[str]] = {}
         for g in groups:
-            gpk = g.get("pk", "")
-            group_users = g.get("users_obj", []) or g.get("users", [])
+            gpk = g.pk
+            group_users = g.users_obj or g.users or []
             names: list[str] = []
             for u in group_users:
                 if isinstance(u, dict):
-                    name = u.get("username", "")
-                    if name:
-                        names.append(name)
+                    name = u.username
                 elif isinstance(u, int):
-                    name = user_pk_to_name.get(u)
-                    if name:
-                        names.append(name)
+                    name = user_pk_to_name.get(u, "")
+                else:
+                    continue
+                if name and name in known_usernames:
+                    names.append(name)
+                elif name:
+                    log.debug("Skipping group member %r (not in fetched users)", name)
             members_by_group[gpk] = names
 
         conn: Connection | None = None
@@ -137,17 +147,18 @@ class LDAPSync:
             log.info("Creating base structure...")
             self._create_base_structure(conn)
 
-            # Create user entries
+            # Create user entries and track which DNs were actually created
             log.info("Creating %d user entries...", len(users))
+            created_user_dns: set[str] = set()
             for user in users:
                 entry = self._build_user_entry(user)
-                if entry:
-                    self._ldap_add_entry(conn, entry)
+                if entry and self._ldap_add_entry(conn, entry):
+                    created_user_dns.add(entry[0])
 
-            # Create group entries
+            # Create group entries (only reference members that exist)
             log.info("Creating %d group entries...", len(groups))
             for group in groups:
-                entry = self._build_group_entry(group, members_by_group)
+                entry = self._build_group_entry(group)
                 if entry:
                     self._ldap_add_entry(conn, entry)
         finally:
@@ -157,6 +168,19 @@ class LDAPSync:
         log.info("Sync complete.")
         return True
 
+    
+    def get_all_users(self) -> list[User]:
+        """
+        Fetch all users from the authentik API.
+        """
+        return self.client.get_all_users(page_size=500)
+    
+    def get_all_groups(self) -> list[Group]:
+        """
+        Fetch all groups from the authentik API.
+        """
+        return self.client.get_all_groups(page_size=500, include_users=True)
+    
     # ----- LDIF builders -----
 
     def _build_base_entries(self) -> list[tuple[str, list[str], dict[str, Any]]]:
@@ -195,24 +219,31 @@ class LDAPSync:
 
     def _group_dn(self, group_name: str) -> str:
         return f"cn={escape_rdn(group_name)},ou=groups,{self.base_dn}"
+    
+    def _get_user_surname(self, user: User) -> str:
+        name = user.name if user.name else user.username
+        return name.split()[-1] if " " in name else name
 
-    def _build_user_entry(self, user: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]] | None:
-        username = user.get("username", "")
+    def _build_user_entry(self, user: User) -> tuple[str, list[str], dict[str, Any]] | None:
+        username = user.username
         if not self._validate_name(username, "user"):
             return None
+        
+        
+        log.info("Test: %s has name %s, sn=%s", username, user.name, self._get_user_surname(user))
 
         dn = self._user_dn(username)
-        name = user.get("name", username)
-        email = user.get("email", "")
-        is_active = user.get("is_active", False)
-        uid_number = user.get("pk", 1000)
-        custom_attrs = user.get("attributes", {})
+        name = user.name if user.name else username
+        email = user.email if user.email else ""
+        is_active = user.is_active if user.is_active is not None else False
+        uid_number = user.pk if user.pk is not None else 1000
+        custom_attrs = user.attributes if user.attributes is not None else {}
         safe_username = username.replace("/", "_").replace("\x00", "")
 
         attrs: dict[str, Any] = {
             "cn": username,
             "uid": username,
-            "sn": name.split()[-1] if " " in name else name,
+            "sn": self._get_user_surname(user),
             "displayName": name,
             "uidNumber": str(uid_number + 10000),
             "gidNumber": "10000",
@@ -242,36 +273,43 @@ class LDAPSync:
         ]
         return dn, object_classes, attrs
 
-    def _build_group_entry(
-        self, group: dict[str, Any], members: dict[str, list[str]]
-    ) -> tuple[str, list[str], dict[str, Any]] | None:
-        group_name = group.get("name", "")
+    def _get_group_usernames(self, group: Group) -> list[str]:
+        if group.users_obj is not None:
+            return [u.username for u in group.users_obj if u.username]
+
+        if group.users is not None:
+            return [str(u) for u in group.users if str(u)]
+
+        return []
+
+    def _build_group_entry(self, group: Group) -> tuple[str, list[str], dict[str, Any]] | None:
+        group_name = group.name
         if not self._validate_name(group_name, "group"):
             return None
 
         dn = self._group_dn(group_name)
-        gid_raw = group.get("pk", "")
-        attrs = group.get("attributes", {})
+        gid = group.num_pk
+        attrs = group.attributes or {}
 
         entry_attrs: dict[str, Any] = {
             "cn": group_name,
         }
 
-        # gidNumber: deterministic hash for UUID strings, offset for ints
-        if isinstance(gid_raw, str):
-            gid_hash = int.from_bytes(
-                hashlib.sha256(gid_raw.encode()).digest()[:4], "big"
-            )
-            entry_attrs["gidNumber"] = str(gid_hash % 60000 + 10000)
-        else:
-            entry_attrs["gidNumber"] = str(gid_raw + 20000)
+        entry_attrs["gidNumber"] = str(gid + 20000)
+            
 
-        # Members
-        member_names = members.get(group.get("pk", ""), [])
-        if member_names:
-            entry_attrs["member"] = [self._user_dn(uname) for uname in member_names]
+        # Members — only include users whose entries were actually created
+        member_names = self._get_group_usernames(group)
+        member_dns: list[str] = []
+        for uname in member_names:
+            member_dn = self._user_dn(uname)
+            member_dns.append(member_dn)
+        if member_dns:
+            entry_attrs["member"] = member_dns
         else:
-            entry_attrs["member"] = f"cn=_placeholder,ou=users,{self.base_dn}"
+            # groupOfNames requires at least one member; use placeholder
+            placeholder_dn = f"cn=_placeholder,ou=users,{self.base_dn}"
+            entry_attrs["member"] = placeholder_dn
 
         # Custom attributes pass-through (case-insensitive key merge)
         for key, values in self._normalized_custom_attrs(attrs, _BUILTIN_GROUP_ATTRS_LOWER).items():
@@ -372,12 +410,12 @@ class LDAPSync:
 
     def _desired_custom_attr_names(
         self,
-        users: list[dict[str, Any]],
-        groups: list[dict[str, Any]],
+        users: list[User],
+        groups: list[Group],
     ) -> set[str]:
         canonical_name_by_lower: dict[str, str] = {}
         for user in users:
-            for key in (user.get("attributes", {}) or {}).keys():
+            for key in (user.attributes or {}).keys():
                 if not _VALID_ATTR_NAME.match(key):
                     continue
                 key_lower = key.lower()
@@ -385,7 +423,7 @@ class LDAPSync:
                     continue
                 canonical_name_by_lower.setdefault(key_lower, key)
         for group in groups:
-            for key in (group.get("attributes", {}) or {}).keys():
+            for key in (group.attributes or {}).keys():
                 if not _VALID_ATTR_NAME.match(key):
                     continue
                 key_lower = key.lower()
@@ -417,8 +455,8 @@ class LDAPSync:
     def _ensure_dynamic_schema(
         self,
         conn: Connection,
-        users: list[dict[str, Any]],
-        groups: list[dict[str, Any]],
+        users: list[User],
+        groups: list[Group],
     ) -> None:
         desired = self._desired_custom_attr_names(users, groups)
         if not desired:

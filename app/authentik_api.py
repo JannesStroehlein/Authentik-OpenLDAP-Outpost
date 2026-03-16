@@ -39,46 +39,26 @@ class AuthentikClient:
 
     # ----- paginated API fetch (Bearer token auth) -----
 
-    def get_paginated(self, path: str) -> list[dict[str, Any]]:
-        """Fetch all pages from an authentik API endpoint.
-
-        Uses authentik-client for known endpoints and falls back to raw HTTP for
-        any other path.
+    def get_all_users(self, page_size: int) -> list[authentik_client.User]:
         """
-        parsed = urllib.parse.urlparse(path)
-        endpoint_path = parsed.path
-        query = urllib.parse.parse_qs(parsed.query)
-
-        if endpoint_path.startswith("/api/v3/core/users/"):
-            try:
-                return self._get_users_via_client(query)
-            except Exception as exc:
-                log.warning("SDK client failed for users, falling back to raw HTTP: %s", exc)
-        if endpoint_path.startswith("/api/v3/core/groups/"):
-            try:
-                return self._get_groups_via_client(query)
-            except Exception as exc:
-                log.warning("SDK client failed for groups, falling back to raw HTTP: %s", exc)
-
-        return self._get_paginated_raw(path)
-
-    def _get_users_via_client(self, query: dict[str, list[str]]) -> list[dict[str, Any]]:
-        page_size = int(query.get("page_size", ["500"])[0])
-        results: list[dict[str, Any]] = []
+        Fetch all users from the authentik API.
+        """
+        results: list[authentik_client.User] = []
         page = 1
         while True:
             response = self._core_api.core_users_list(page=page, page_size=page_size)
-            page_items = [item.model_dump(mode="json") for item in (response.results or [])]
-            results.extend(page_items)
-            if not getattr(response, "pagination", None) or not response.pagination.next:
+            page_users = response.results
+            results.extend(page_users or [])
+            if response.pagination.total_pages == response.pagination.current:
                 break
-            page += 1
+            page = response.pagination.next
         return results
 
-    def _get_groups_via_client(self, query: dict[str, list[str]]) -> list[dict[str, Any]]:
-        page_size = int(query.get("page_size", ["500"])[0])
-        include_users = query.get("include_users", ["false"])[0].lower() == "true"
-        results: list[dict[str, Any]] = []
+    def get_all_groups(self, page_size: int, include_users: bool) -> list[authentik_client.Group]:
+        """
+        Fetch all groups from the authentik API.
+        """
+        results: list[authentik_client.Group] = []
         page = 1
         while True:
             response = self._core_api.core_groups_list(
@@ -86,30 +66,11 @@ class AuthentikClient:
                 page_size=page_size,
                 include_users=include_users,
             )
-            page_items = [item.model_dump(mode="json") for item in (response.results or [])]
-            results.extend(page_items)
-            if not getattr(response, "pagination", None) or not response.pagination.next:
+            page_groups = response.results
+            results.extend(page_groups or [])
+            if response.pagination.total_pages == response.pagination.current:
                 break
-            page += 1
-        return results
-
-    def _get_paginated_raw(self, path: str) -> list[dict[str, Any]]:
-        """Fallback: paginated raw HTTP call for unknown endpoints."""
-        results: list[dict[str, Any]] = []
-        url: str | None = f"{self.url}{path}"
-        while url:
-            req = urllib.request.Request(url, headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/json",
-            })
-            try:
-                with urllib.request.urlopen(req, context=self.ssl_ctx) as resp:
-                    data = json.loads(resp.read().decode())
-            except urllib.error.HTTPError as exc:
-                log.error("API %s failed: %s %s", url, exc.code, exc.reason)
-                raise
-            results.extend(data.get("results", []))
-            url = data.get("pagination", {}).get("next")
+            page = response.pagination.next
         return results
 
     # ----- flow executor authentication -----
