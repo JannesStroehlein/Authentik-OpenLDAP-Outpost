@@ -7,9 +7,10 @@ rate limiting.
 """
 
 import grp
-import hashlib
+import hmac
 import logging
 import os
+import secrets
 import socket
 import struct
 import sys
@@ -43,7 +44,10 @@ class AuthServer:
         self.flow_slug = flow_slug
         self.cache_ttl = cache_ttl
         self.socket_group = socket_group
-        # Cache: (username, sha256(password)) -> expiry timestamp
+        # Random key generated once per process — makes cached password
+        # hashes useless if memory is dumped after the process exits.
+        self._hmac_key = secrets.token_bytes(32)
+        # Cache: (username, hmac(password)) -> expiry timestamp
         self._cache: dict[tuple[str, str], float] = {}
         self._cache_lock = threading.Lock()
         # Rate limiting: username -> list of failure timestamps
@@ -134,7 +138,7 @@ class AuthServer:
             log.warning("Rate limited auth attempt for %s", username)
             return False
 
-        pw_hash = hashlib.sha256(password.encode()).hexdigest()
+        pw_hash = hmac.new(self._hmac_key, password.encode(), "sha256").hexdigest()
         cache_key = (username, pw_hash)
         now = time.time()
 
