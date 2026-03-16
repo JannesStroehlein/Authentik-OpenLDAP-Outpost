@@ -3,6 +3,7 @@ name = "openldap-authentik-sync"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+  "authentik-client>=2026.2",
   "ldap3>=2.9",
 ]
 

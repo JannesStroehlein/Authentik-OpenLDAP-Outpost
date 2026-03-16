@@ -1,9 +1,10 @@
 services:
   mock-authentik:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
     volumes:
       - ./mock_authentik.py:/app/mock_authentik.py:ro
-    command: python3 -u /app/mock_authentik.py
     healthcheck:
       test:
         [
