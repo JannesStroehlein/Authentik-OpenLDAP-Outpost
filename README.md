@@ -43,6 +43,10 @@ This replaces the Authentik LDAP outpost with a self-managed OpenLDAP instance w
 ## Quick start
 
 ```bash
+# Using the pre-built image from GHCR
+docker pull ghcr.io/jannesstroehlein/authentik-openldap-outpost:latest
+
+# Or build locally
 cp .env.example .env   # set AUTHENTIK_URL and AUTHENTIK_TOKEN
 docker compose up -d
 ```
@@ -50,7 +54,9 @@ docker compose up -d
 Test with:
 
 ```bash
-ldapsearch -x -H ldap://localhost:3389 -b "DC=ldap,DC=goauthentik,DC=io" "(objectClass=posixAccount)"
+ldapsearch -x -H ldap://localhost:3389 \
+    -D "cn=youruser,ou=users,DC=ldap,DC=goauthentik,DC=io" -W \
+    -b "DC=ldap,DC=goauthentik,DC=io" "(objectClass=posixAccount)"
 ```
 
 ## Configuration
@@ -63,6 +69,7 @@ All configuration is via environment variables:
 | `AUTHENTIK_TOKEN`          | _required_                     | API token with read access to users/groups             |
 | `AUTHENTIK_AUTH_FLOW_SLUG` | `default-authentication-flow`  | Flow slug used for bind authentication                 |
 | `LDAP_BASE_DN`             | `DC=ldap,DC=goauthentik,DC=io` | LDAP directory base DN                                 |
+| `LDAP_SEARCH_ACCESS_GROUP` | `ldap-search-access`           | Authentik group whose members can read the full directory |
 | `LDAP_PORT`                | `3389`                         | LDAP listen port                                       |
 | `LDAPS_PORT`               | `6636`                         | LDAPS (TLS) listen port                                |
 | `SYNC_INTERVAL`            | `300`                          | Seconds between sync cycles                            |
