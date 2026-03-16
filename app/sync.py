@@ -519,8 +519,10 @@ class LDAPSync:
         dns: list[str] = [entry.entry_dn for entry in conn.entries]
 
         # Delete deepest first, keep base DN to be recreated explicitly.
+        # Groups must be deleted before users so the memberof overlay can
+        # clean up memberOf attributes while the user entries still exist.
         dns = [dn for dn in dns if dn.lower() != self.base_dn.lower()]
-        dns.sort(key=lambda dn: dn.count(","), reverse=True)
+        dns.sort(key=lambda dn: (-dn.count(","), 0 if "ou=groups" in dn.lower() else 1))
         for dn in dns:
             conn.delete(dn)
 

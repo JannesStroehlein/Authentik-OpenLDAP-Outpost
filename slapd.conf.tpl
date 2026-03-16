@@ -18,6 +18,7 @@ include     /etc/ldap/schema/custom/01-authentik.schema
 # Modules
 modulepath  /usr/lib/ldap
 moduleload  back_mdb
+moduleload  memberof
 
 # Logging
 loglevel    %%SLAPD_LOG_LEVEL%%
@@ -59,7 +60,16 @@ index       cn              eq,sub
 index       uid             eq
 index       mail            eq,sub
 index       member          eq
+index       memberOf        eq
 index       gidNumber       eq
 index       uidNumber       eq
 index       entryCSN        eq
 index       entryUUID       eq
+
+# memberof overlay: auto-populate memberOf on user entries from group member attrs
+overlay     memberof
+memberof-group-oc       groupOfNames
+memberof-member-ad      member
+memberof-memberof-ad    memberOf
+memberof-dangling       ignore
+memberof-refint         false
