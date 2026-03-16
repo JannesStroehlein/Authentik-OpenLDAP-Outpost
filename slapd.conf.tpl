@@ -40,16 +40,23 @@ database    mdb
 suffix      "%%BASE_DN%%"
 
 # Main data DB ACLs
+#
+# userPassword: IPC root can write (sync), user can read own, anonymous
+# can only use it for bind authentication.
 access to attrs=userPassword
     by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
-    by self read
     by anonymous auth
     by * none
 
+# Everything else: IPC root can write, members of the search-access group
+# can read the full directory, all other users can only read themselves.
+# Anonymous gets no read access.
 access to *
     by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" write
-    by users read
-    by anonymous read
+    by group/groupOfNames/member="cn=%%SEARCH_GROUP%%,ou=groups,%%BASE_DN%%" read
+    by self read
+    by anonymous auth
+    by * none
 
 maxsize     1073741824
 directory   /var/lib/ldap

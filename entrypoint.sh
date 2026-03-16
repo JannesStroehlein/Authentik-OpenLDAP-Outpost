@@ -6,6 +6,7 @@ set -e
 # ---------------------------------------------------------------------------
 LDAP_BASE_DN="${LDAP_BASE_DN:-DC=ldap,DC=goauthentik,DC=io}"
 LDAP_PORT="${LDAP_PORT:-3389}"
+LDAP_SEARCH_ACCESS_GROUP="${LDAP_SEARCH_ACCESS_GROUP:-ldap-search-access}"
 SLAPD_LOG_LEVEL="${SLAPD_LOG_LEVEL:-256}"
 SLAPD_CONFIG_DIR="${SLAPD_CONFIG_DIR:-/var/lib/ldap/slapd.d}"
 
@@ -49,6 +50,7 @@ fi
 printf '%s\n' "$TLS_CONFIG" > /tmp/tls_config.txt
 sed \
     -e "s|%%BASE_DN%%|${LDAP_BASE_DN}|g" \
+    -e "s|%%SEARCH_GROUP%%|${LDAP_SEARCH_ACCESS_GROUP}|g" \
     -e "s|%%SLAPD_LOG_LEVEL%%|${SLAPD_LOG_LEVEL}|g" \
     /etc/ldap/slapd.conf.tpl | sed -e '/%%TLS_CONFIG%%/{
 r /tmp/tls_config.txt

@@ -8,6 +8,7 @@ services:
       AUTHENTIK_AUTH_FLOW_SLUG: ldap-authentication-flow
       LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
       LDAP_PORT: "3389"
+      LDAP_SEARCH_ACCESS_GROUP: ${LDAP_SEARCH_ACCESS_GROUP:-ldap-search-access}
       SYNC_INTERVAL: "300"
       BIND_CACHE_TTL: "300"
       VERIFY_TLS: "true"

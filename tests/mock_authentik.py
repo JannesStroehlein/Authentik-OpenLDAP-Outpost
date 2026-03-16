@@ -175,11 +175,20 @@ _GROUP_RESULTS = [
         attributes={},
         users_obj=[],
     ),
+    _build_group(
+        num_pk=4,
+        group_uuid="dddddddd-1111-2222-3333-444444444444",
+        name="ldap-search-access",
+        attributes={},
+        users_obj=[
+            {"pk": 1, "username": "alice", "name": "Alice Admin", "uid": "uid-1"},
+        ],
+    ),
 ]
 
 GROUPS = PaginatedGroupList(
     pagination=Pagination(
-        count=3,
+        count=4,
         next=0,
         previous=0,
         current=1,
@@ -194,6 +203,7 @@ GROUPS = PaginatedGroupList(
 # Valid test credentials for flow executor
 VALID_USERS = {
     "alice": "alice-secret",
+    "bob": "bob-secret",
 }
 
 # Per-session flow state (keyed by session cookie)

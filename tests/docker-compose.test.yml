@@ -27,6 +27,7 @@ services:
       AUTHENTIK_AUTH_FLOW_SLUG: default-authentication-flow
       LDAP_BASE_DN: DC=ldap,DC=goauthentik,DC=io
       LDAP_PORT: "389"
+      LDAP_SEARCH_ACCESS_GROUP: ldap-search-access
       SYNC_INTERVAL: "3600"
       BIND_CACHE_TTL: "300"
       LOG_LEVEL: DEBUG

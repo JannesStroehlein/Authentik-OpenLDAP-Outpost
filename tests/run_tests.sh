@@ -14,6 +14,10 @@ COMPOSE="docker compose -f docker-compose.test.yml -p ak-ldap-test"
 LDAP_URI="ldap://localhost:3389"
 BASE_DN="DC=ldap,DC=goauthentik,DC=io"
 
+# Bind credentials for authenticated searches (alice is in ldap-search-access group)
+BIND_DN="cn=alice,ou=users,$BASE_DN"
+BIND_PW="alice-secret"
+
 PASS=0
 FAIL=0
 TESTS=0
@@ -34,6 +38,7 @@ assert_count() {
     TESTS=$((TESTS + 1))
     local output
     output=$(ldapsearch -x -H "$LDAP_URI" \
+        -D "$BIND_DN" -w "$BIND_PW" \
         -b "$search_base" "$filter" dn -LLL 2>/dev/null)
     local count
     count=$(echo "$output" | grep -c "^dn:" || true)
@@ -58,6 +63,7 @@ assert_attr() {
     TESTS=$((TESTS + 1))
     local output
     output=$(ldapsearch -x -H "$LDAP_URI" \
+        -D "$BIND_DN" -w "$BIND_PW" \
         -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
 
     # Check plain text match first, then try base64-decoded values
@@ -86,6 +92,7 @@ assert_attr_count() {
     TESTS=$((TESTS + 1))
     local output
     output=$(ldapsearch -x -H "$LDAP_URI" \
+        -D "$BIND_DN" -w "$BIND_PW" \
         -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
     local count
     count=$(echo "$output" | grep -ci "^$attr:" || true)
@@ -108,6 +115,7 @@ assert_no_attr() {
     TESTS=$((TESTS + 1))
     local output
     output=$(ldapsearch -x -H "$LDAP_URI" \
+        -D "$BIND_DN" -w "$BIND_PW" \
         -b "$dn" -s base "(objectClass=*)" "$attr" -LLL 2>/dev/null)
 
     if echo "$output" | grep -qi "^$attr:"; then
@@ -181,16 +189,17 @@ assert_attr_count "bob has 1 mailAlias" "cn=bob,ou=users,$BASE_DN" "mailAlias" 1
 assert_attr "alice active (loginShell)" "cn=alice,ou=users,$BASE_DN" "loginShell" "/bin/bash"
 assert_attr "charlie inactive (loginShell)" "cn=charlie,ou=users,$BASE_DN" "loginShell" "/sbin/nologin"
 
-# SASL password should not be readable anonymously
+# userPassword should not be readable by other authenticated users
 TESTS=$((TESTS + 1))
 pw_output=$(ldapsearch -x -H "$LDAP_URI" \
-    -b "cn=alice,ou=users,$BASE_DN" -s base "(objectClass=*)" "userPassword" -LLL 2>/dev/null)
+    -D "$BIND_DN" -w "$BIND_PW" \
+    -b "cn=bob,ou=users,$BASE_DN" -s base "(objectClass=*)" "userPassword" -LLL 2>/dev/null)
 if echo "$pw_output" | grep -qi "^userPassword:"; then
-    echo "  FAIL: alice userPassword should not be readable anonymously"
+    echo "  FAIL: bob userPassword should not be readable by alice"
     echo "        output: $pw_output"
     FAIL=$((FAIL + 1))
 else
-    echo "  PASS: alice userPassword is not readable anonymously"
+    echo "  PASS: bob userPassword is not readable by other users"
     PASS=$((PASS + 1))
 fi
 
@@ -206,7 +215,7 @@ assert_no_attr "alice invalid attr dropped" "cn=alice,ou=users,$BASE_DN" "webaut
 echo ""
 echo "--- Groups ---"
 # -------------------------------------------------------------------------
-assert_count "3 groups synced" 3 "(objectClass=posixGroup)" "ou=groups,$BASE_DN"
+assert_count "4 groups synced" 4 "(objectClass=posixGroup)" "ou=groups,$BASE_DN"
 
 assert_attr "admins systemMail" "cn=admins,ou=groups,$BASE_DN" "systemMail" "admins@test.local"
 assert_attr "developers systemMail" "cn=developers,ou=groups,$BASE_DN" "systemMail" "dev@test.local"
@@ -229,10 +238,11 @@ assert_attr "admins authentikMeta serialized" "cn=admins,ou=groups,$BASE_DN" "au
 echo ""
 echo "--- memberOf (overlay) ---"
 # -------------------------------------------------------------------------
-# alice is in admins + developers
-assert_attr_count "alice has 2 memberOf" "cn=alice,ou=users,$BASE_DN" "memberOf" 2
+# alice is in admins + developers + ldap-search-access
+assert_attr_count "alice has 3 memberOf" "cn=alice,ou=users,$BASE_DN" "memberOf" 3
 assert_attr "alice memberOf admins" "cn=alice,ou=users,$BASE_DN" "memberOf" "cn=admins,ou=groups,$BASE_DN"
 assert_attr "alice memberOf developers" "cn=alice,ou=users,$BASE_DN" "memberOf" "cn=developers,ou=groups,$BASE_DN"
+assert_attr "alice memberOf ldap-search-access" "cn=alice,ou=users,$BASE_DN" "memberOf" "cn=ldap-search-access,ou=groups,$BASE_DN"
 
 # bob is in admins only
 assert_attr_count "bob has 1 memberOf" "cn=bob,ou=users,$BASE_DN" "memberOf" 1
@@ -270,24 +280,26 @@ assert_count \
 echo ""
 echo "--- Search scopes ---"
 # -------------------------------------------------------------------------
-# Subtree search from base should find everything
+# Subtree search from base should find everything (authenticated)
 TESTS=$((TESTS + 1))
 subtree_count=$(ldapsearch -x -H "$LDAP_URI" \
+    -D "$BIND_DN" -w "$BIND_PW" \
     -b "$BASE_DN" -s sub "(objectClass=*)" dn -LLL 2>/dev/null | grep -c "^dn:" || true)
-if [ "$subtree_count" -ge 9 ]; then  # base + 2 OUs + 3 users + 3 groups
+if [ "$subtree_count" -ge 10 ]; then  # base + 2 OUs + 3 users + 4 groups
     echo "  PASS: Subtree search from base (found $subtree_count entries)"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: Subtree search from base (expected >= 9, got $subtree_count)"
+    echo "  FAIL: Subtree search from base (expected >= 10, got $subtree_count)"
     FAIL=$((FAIL + 1))
 fi
 
 # One-level search from ou=users should find only users
 assert_count "One-level search in ou=users" 3 "(objectClass=posixAccount)" "ou=users,$BASE_DN"
 
-# Base scope on a specific user
+# Base scope on a specific user (authenticated)
 TESTS=$((TESTS + 1))
 base_output=$(ldapsearch -x -H "$LDAP_URI" \
+    -D "$BIND_DN" -w "$BIND_PW" \
     -b "cn=alice,ou=users,$BASE_DN" -s base "(objectClass=*)" cn -LLL 2>/dev/null)
 if echo "$base_output" | grep -q "cn: alice"; then
     echo "  PASS: Base scope search on alice"
@@ -335,15 +347,65 @@ fi
 
 # -------------------------------------------------------------------------
 echo ""
-echo "--- Anonymous read access ---"
+echo "--- ACL: anonymous read denied ---"
 # -------------------------------------------------------------------------
 TESTS=$((TESTS + 1))
-anon_output=$(ldapsearch -x -H "$LDAP_URI" -b "ou=users,$BASE_DN" "(cn=alice)" cn -LLL 2>/dev/null)
+anon_output=$(ldapsearch -x -H "$LDAP_URI" -b "ou=users,$BASE_DN" "(cn=alice)" cn -LLL 2>/dev/null || true)
 if echo "$anon_output" | grep -q "cn: alice"; then
-    echo "  PASS: Anonymous read works"
+    echo "  FAIL: Anonymous read should be denied"
+    echo "        output: $anon_output"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: Anonymous read denied"
+    PASS=$((PASS + 1))
+fi
+
+# -------------------------------------------------------------------------
+echo ""
+echo "--- ACL: non-privileged user can only read self ---"
+# -------------------------------------------------------------------------
+# bob is NOT in ldap-search-access group — should only see his own entry
+TESTS=$((TESTS + 1))
+bob_self=$(ldapsearch -x -H "$LDAP_URI" \
+    -D "cn=bob,ou=users,$BASE_DN" -w "bob-secret" \
+    -b "cn=bob,ou=users,$BASE_DN" -s base "(objectClass=*)" cn -LLL 2>/dev/null || true)
+if echo "$bob_self" | grep -q "cn: bob"; then
+    echo "  PASS: bob can read his own entry"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: Anonymous read denied"
+    echo "  FAIL: bob cannot read his own entry"
+    echo "        output: $bob_self"
+    FAIL=$((FAIL + 1))
+fi
+
+TESTS=$((TESTS + 1))
+bob_alice=$(ldapsearch -x -H "$LDAP_URI" \
+    -D "cn=bob,ou=users,$BASE_DN" -w "bob-secret" \
+    -b "cn=alice,ou=users,$BASE_DN" -s base "(objectClass=*)" cn -LLL 2>/dev/null || true)
+if echo "$bob_alice" | grep -q "cn: alice"; then
+    echo "  FAIL: bob should not be able to read alice's entry"
+    echo "        output: $bob_alice"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: bob cannot read alice's entry"
+    PASS=$((PASS + 1))
+fi
+
+# -------------------------------------------------------------------------
+echo ""
+echo "--- ACL: privileged user (ldap-search-access) can read full dir ---"
+# -------------------------------------------------------------------------
+TESTS=$((TESTS + 1))
+alice_all=$(ldapsearch -x -H "$LDAP_URI" \
+    -D "$BIND_DN" -w "$BIND_PW" \
+    -b "ou=users,$BASE_DN" "(objectClass=posixAccount)" dn -LLL 2>/dev/null)
+alice_all_count=$(echo "$alice_all" | grep -c "^dn:" || true)
+if [ "$alice_all_count" -eq 3 ]; then
+    echo "  PASS: alice (ldap-search-access) can read all users ($alice_all_count)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: alice should read all 3 users (got $alice_all_count)"
+    echo "        output: $alice_all"
     FAIL=$((FAIL + 1))
 fi
 
