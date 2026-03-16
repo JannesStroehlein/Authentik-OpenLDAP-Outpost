@@ -136,7 +136,7 @@ USERS = PaginatedUserList(
     ),
     results=_USER_RESULTS,
     autocomplete={},
-).to_dict()
+).model_dump(mode="json")
 
 _GROUP_RESULTS = [
     _build_group(
@@ -189,7 +189,7 @@ GROUPS = PaginatedGroupList(
     ),
     results=_GROUP_RESULTS,
     autocomplete={},
-).to_dict()
+).model_dump(mode="json")
 
 # Valid test credentials for flow executor
 VALID_USERS = {

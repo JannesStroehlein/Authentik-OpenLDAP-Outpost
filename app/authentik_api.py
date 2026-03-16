@@ -49,9 +49,15 @@ class AuthentikClient:
         query = urllib.parse.parse_qs(parsed.query)
 
         if endpoint_path.startswith("/api/v3/core/users/"):
-            return self._get_users_via_client(query)
+            try:
+                return self._get_users_via_client(query)
+            except Exception as exc:
+                log.warning("SDK client failed for users, falling back to raw HTTP: %s", exc)
         if endpoint_path.startswith("/api/v3/core/groups/"):
-            return self._get_groups_via_client(query)
+            try:
+                return self._get_groups_via_client(query)
+            except Exception as exc:
+                log.warning("SDK client failed for groups, falling back to raw HTTP: %s", exc)
 
         return self._get_paginated_raw(path)
 
@@ -61,7 +67,7 @@ class AuthentikClient:
         page = 1
         while True:
             response = self._core_api.core_users_list(page=page, page_size=page_size)
-            page_items = [item.to_dict() for item in (response.results or [])]
+            page_items = [item.model_dump(mode="json") for item in (response.results or [])]
             results.extend(page_items)
             if not getattr(response, "pagination", None) or not response.pagination.next:
                 break
@@ -79,7 +85,7 @@ class AuthentikClient:
                 page_size=page_size,
                 include_users=include_users,
             )
-            page_items = [item.to_dict() for item in (response.results or [])]
+            page_items = [item.model_dump(mode="json") for item in (response.results or [])]
             results.extend(page_items)
             if not getattr(response, "pagination", None) or not response.pagination.next:
                 break
