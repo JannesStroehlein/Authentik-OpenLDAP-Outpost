@@ -10,12 +10,51 @@ SLAPD_LOG_LEVEL="${SLAPD_LOG_LEVEL:-256}"
 SLAPD_CONFIG_DIR="${SLAPD_CONFIG_DIR:-/var/lib/ldap/slapd.d}"
 
 # ---------------------------------------------------------------------------
-# 1. Generate slapd.conf from template
+# 1. TLS certificate setup
 # ---------------------------------------------------------------------------
+LDAP_TLS_CERT="${LDAP_TLS_CERT:-}"
+LDAP_TLS_KEY="${LDAP_TLS_KEY:-}"
+LDAP_TLS_CA="${LDAP_TLS_CA:-}"
+TLS_CONFIG=""
+
+if [ -n "$LDAP_TLS_CERT" ] && [ -n "$LDAP_TLS_KEY" ]; then
+    TLS_CONFIG="TLSCertificateFile    ${LDAP_TLS_CERT}
+TLSCertificateKeyFile ${LDAP_TLS_KEY}"
+    if [ -n "$LDAP_TLS_CA" ]; then
+        TLS_CONFIG="${TLS_CONFIG}
+TLSCACertificateFile  ${LDAP_TLS_CA}"
+    fi
+    echo "TLS configured (cert: ${LDAP_TLS_CERT})"
+elif [ ! -f /etc/ldap/certs/ldap.crt ]; then
+    # Generate self-signed cert for LDAPS if no cert provided
+    mkdir -p /etc/ldap/certs
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout /etc/ldap/certs/ldap.key \
+        -out /etc/ldap/certs/ldap.crt \
+        -days 3650 -subj "/CN=ldap" 2>/dev/null
+    chown openldap:openldap /etc/ldap/certs/ldap.key /etc/ldap/certs/ldap.crt
+    chmod 600 /etc/ldap/certs/ldap.key
+    TLS_CONFIG="TLSCertificateFile    /etc/ldap/certs/ldap.crt
+TLSCertificateKeyFile /etc/ldap/certs/ldap.key"
+    echo "TLS configured (self-signed certificate generated)"
+else
+    TLS_CONFIG="TLSCertificateFile    /etc/ldap/certs/ldap.crt
+TLSCertificateKeyFile /etc/ldap/certs/ldap.key"
+    echo "TLS configured (existing self-signed certificate)"
+fi
+
+# ---------------------------------------------------------------------------
+# 1.1 Generate slapd.conf from template
+# ---------------------------------------------------------------------------
+printf '%s\n' "$TLS_CONFIG" > /tmp/tls_config.txt
 sed \
     -e "s|%%BASE_DN%%|${LDAP_BASE_DN}|g" \
     -e "s|%%SLAPD_LOG_LEVEL%%|${SLAPD_LOG_LEVEL}|g" \
-    /etc/ldap/slapd.conf.tpl > /etc/ldap/slapd.conf
+    /etc/ldap/slapd.conf.tpl | sed -e '/%%TLS_CONFIG%%/{
+r /tmp/tls_config.txt
+d
+}' > /etc/ldap/slapd.conf
+rm -f /tmp/tls_config.txt
 
 echo "Generated slapd.conf (base DN: ${LDAP_BASE_DN})"
 
@@ -57,9 +96,10 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Start slapd
 # ---------------------------------------------------------------------------
-echo "Starting slapd on port ${LDAP_PORT}..."
+LDAPS_PORT="${LDAPS_PORT:-6636}"
+echo "Starting slapd on port ${LDAP_PORT} (ldap) and ${LDAPS_PORT} (ldaps)..."
 /usr/sbin/slapd \
-    -h "ldap://0.0.0.0:${LDAP_PORT}/ ldapi:///" \
+    -h "ldap://0.0.0.0:${LDAP_PORT}/ ldaps://0.0.0.0:${LDAPS_PORT}/ ldapi:///" \
     -F "$SLAPD_CONFIG_DIR" \
     -u openldap \
     -g openldap \

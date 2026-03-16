@@ -66,6 +66,9 @@ index       uidNumber       eq
 index       entryCSN        eq
 index       entryUUID       eq
 
+# TLS (populated by entrypoint.sh if certs are present)
+%%TLS_CONFIG%%
+
 # memberof overlay: auto-populate memberOf on user entries from group member attrs
 overlay     memberof
 memberof-group-oc       groupOfNames

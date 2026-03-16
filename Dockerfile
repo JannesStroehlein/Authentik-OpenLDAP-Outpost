@@ -5,7 +5,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     slapd ldap-utils python3 procps \
     libsasl2-2 libsasl2-modules \
-    ca-certificates \
+    ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uvbin /uv /usr/local/bin/uv

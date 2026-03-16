@@ -27,6 +27,7 @@ from ldap3 import (
     Server,
     EXTERNAL,
 )
+from ldap3.utils.dn import escape_rdn
 
 from .authentik_api import AuthentikClient
 
@@ -48,6 +49,11 @@ _BUILTIN_USER_ATTRS = {
 _BUILTIN_GROUP_ATTRS = {"cn", "gidNumber", "member"}
 _BUILTIN_USER_ATTRS_LOWER = {attr.lower() for attr in _BUILTIN_USER_ATTRS}
 _BUILTIN_GROUP_ATTRS_LOWER = {attr.lower() for attr in _BUILTIN_GROUP_ATTRS}
+
+# Characters that are unsafe in LDAP DN values, filesystem paths, or SASL identities
+_UNSAFE_NAME_RE = re.compile(r"[\x00/]")
+# Max length for usernames and group names used in DNs
+_MAX_NAME_LENGTH = 256
 
 
 class LDAPSync:
@@ -173,17 +179,35 @@ class LDAPSync:
             ),
         ]
 
+    @staticmethod
+    def _validate_name(name: str, kind: str) -> bool:
+        """Reject names that are empty, too long, or contain unsafe characters."""
+        if not name or len(name) > _MAX_NAME_LENGTH:
+            log.warning("Skipping %s with invalid name (empty or too long): %r", kind, name[:64])
+            return False
+        if _UNSAFE_NAME_RE.search(name):
+            log.warning("Skipping %s with unsafe characters in name: %r", kind, name[:64])
+            return False
+        return True
+
+    def _user_dn(self, username: str) -> str:
+        return f"cn={escape_rdn(username)},ou=users,{self.base_dn}"
+
+    def _group_dn(self, group_name: str) -> str:
+        return f"cn={escape_rdn(group_name)},ou=groups,{self.base_dn}"
+
     def _build_user_entry(self, user: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]] | None:
         username = user.get("username", "")
-        if not username:
+        if not self._validate_name(username, "user"):
             return None
 
-        dn = f"cn={username},ou=users,{self.base_dn}"
+        dn = self._user_dn(username)
         name = user.get("name", username)
         email = user.get("email", "")
         is_active = user.get("is_active", False)
         uid_number = user.get("pk", 1000)
         custom_attrs = user.get("attributes", {})
+        safe_username = username.replace("/", "_").replace("\x00", "")
 
         attrs: dict[str, Any] = {
             "cn": username,
@@ -192,7 +216,7 @@ class LDAPSync:
             "displayName": name,
             "uidNumber": str(uid_number + 10000),
             "gidNumber": "10000",
-            "homeDirectory": f"/home/{username}",
+            "homeDirectory": f"/home/{safe_username}",
             "loginShell": "/bin/bash" if is_active else "/sbin/nologin",
             "userPassword": f"{{SASL}}{username}@authentik",
         }
@@ -222,10 +246,10 @@ class LDAPSync:
         self, group: dict[str, Any], members: dict[str, list[str]]
     ) -> tuple[str, list[str], dict[str, Any]] | None:
         group_name = group.get("name", "")
-        if not group_name:
+        if not self._validate_name(group_name, "group"):
             return None
 
-        dn = f"cn={group_name},ou=groups,{self.base_dn}"
+        dn = self._group_dn(group_name)
         gid_raw = group.get("pk", "")
         attrs = group.get("attributes", {})
 
@@ -233,18 +257,19 @@ class LDAPSync:
             "cn": group_name,
         }
 
-        # gidNumber: hash UUID strings, offset ints
+        # gidNumber: deterministic hash for UUID strings, offset for ints
         if isinstance(gid_raw, str):
-            entry_attrs["gidNumber"] = str(abs(hash(gid_raw)) % 60000 + 10000)
+            gid_hash = int.from_bytes(
+                hashlib.sha256(gid_raw.encode()).digest()[:4], "big"
+            )
+            entry_attrs["gidNumber"] = str(gid_hash % 60000 + 10000)
         else:
             entry_attrs["gidNumber"] = str(gid_raw + 20000)
 
         # Members
         member_names = members.get(group.get("pk", ""), [])
         if member_names:
-            entry_attrs["member"] = [
-                f"cn={uname},ou=users,{self.base_dn}" for uname in member_names
-            ]
+            entry_attrs["member"] = [self._user_dn(uname) for uname in member_names]
         else:
             entry_attrs["member"] = f"cn=_placeholder,ou=users,{self.base_dn}"
 

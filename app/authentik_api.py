@@ -24,6 +24,7 @@ class AuthentikClient:
         self.verify_tls = verify_tls
         self.ssl_ctx: ssl.SSLContext | None = None
         if not verify_tls:
+            log.warning("TLS certificate verification is DISABLED — connections to Authentik are vulnerable to MITM attacks")
             self.ssl_ctx = ssl.create_default_context()
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
